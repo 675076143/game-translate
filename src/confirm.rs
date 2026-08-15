@@ -4,7 +4,7 @@ use strsim::normalized_levenshtein;
 
 use crate::ocr::OcrResult;
 
-const CONFIRM_DELAY: Duration = Duration::from_millis(350);
+const CONFIRM_DELAY: Duration = Duration::from_millis(250);
 const SAME_THRESHOLD: f64 = 0.90;
 
 pub struct CandidateConfirmer {
@@ -28,6 +28,12 @@ impl CandidateConfirmer {
         self.pending
             .as_ref()
             .is_some_and(|pending| now >= pending.1)
+    }
+
+    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        self.pending
+            .as_ref()
+            .map(|pending| pending.1.saturating_duration_since(now))
     }
 
     pub fn confirm(&mut self, result: OcrResult, now: Instant) -> Option<OcrResult> {

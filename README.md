@@ -63,6 +63,14 @@ The OCR regression tests invoke the system `tesseract` executable.
 
 Runtime diagnostics are written to `~/.local/state/game-translate/game-translate.log`. The file is truncated on startup after it exceeds 1 MiB; screenshots are never logged.
 
+Translations use a 256-entry memory cache backed by an append-only SSD cache at `~/.local/state/game-translate/translations.jsonl`. Repeated dialogue is served without a network request, including across restarts.
+
+Summarize measured translation latency with:
+
+```sh
+cargo run --release --example perf_summary -- ~/.local/state/game-translate/game-translate.log
+```
+
 ## Scope
 
 This version deliberately has one capture backend, one OCR engine, one language pair, and one output UI. It does not include legacy Python paths, fallback capture commands, migration code, or speculative configuration layers.
