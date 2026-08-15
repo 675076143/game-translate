@@ -8,7 +8,7 @@ The first supported setup is Pokémon Infinite Fusion running under Proton on Hy
 
 1. `slurp` selects either a dialogue region or an entire program window.
 2. Hyprland IPC binds that selection to its source window, so tiled-window movement cannot redirect capture to another application.
-3. `libwayshot` captures the translated region through the wlroots screencopy protocol without temporary screenshot files.
+3. A vendored `libwayshot` 0.9 captures the translated region through the wlroots screencopy protocol without temporary screenshot files. Its frame lifecycle is patched to destroy every Wayland capture object after use; the upstream ext-image-copy output path is removed because it leaks compositor-owned shared buffers during continuous capture.
 4. A sampled-pixel state machine waits for three stable frames, then a second OCR pass confirms that typewriter text is complete.
 5. Tesseract TSV confidence rejects low-quality noise; normalized Levenshtein similarity suppresses OCR jitter and repeated dialogue.
 6. Known battle templates use canonical Pokémon terminology; other dialogue is translated locally by Qwen through Ollama on a worker thread.
@@ -63,6 +63,12 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 The OCR regression tests invoke the system `tesseract` executable.
+
+The capture stress probe accepts a frame count. After it finishes, the compositor's `RssShmem` should return to its starting value:
+
+```sh
+cargo run --release --example capture_probe -- '0,0 1280x720' 1000
+```
 
 Runtime diagnostics are written to `~/.local/state/game-translate/game-translate.log`. The file is truncated on startup after it exceeds 1 MiB; screenshots are never logged.
 

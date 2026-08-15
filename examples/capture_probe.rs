@@ -9,7 +9,12 @@ use libwayshot::{
 fn main() -> Result<()> {
     let value = env::args()
         .nth(1)
-        .context("usage: capture_probe 'X,Y WIDTHxHEIGHT'")?;
+        .context("usage: capture_probe 'X,Y WIDTHxHEIGHT' [frame-count]")?;
+    let frame_count: u32 = env::args()
+        .nth(2)
+        .map(|value| value.parse())
+        .transpose()?
+        .unwrap_or(50);
     let (position, size) = value.split_once(' ').context("invalid geometry")?;
     let (x, y) = position.split_once(',').context("invalid position")?;
     let (width, height) = size.split_once('x').context("invalid size")?;
@@ -28,20 +33,15 @@ fn main() -> Result<()> {
     let connection = WayshotConnection::new()?;
     let started = Instant::now();
     let mut pixels = 0_u64;
-    for index in 0..50 {
+    for _ in 0..frame_count {
         let image = connection.screenshot(region, false)?;
-        if index == 0
-            && let Some(path) = env::args().nth(2)
-        {
-            image.save(path)?;
-        }
         pixels += u64::from(image.width()) * u64::from(image.height());
     }
     let elapsed = started.elapsed();
     println!(
-        "50 frames in {:.3}s ({:.1} fps), {} pixels",
+        "{frame_count} frames in {:.3}s ({:.1} fps), {} pixels",
         elapsed.as_secs_f64(),
-        50.0 / elapsed.as_secs_f64(),
+        f64::from(frame_count) / elapsed.as_secs_f64(),
         pixels
     );
     Ok(())
