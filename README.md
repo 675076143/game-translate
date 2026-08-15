@@ -1,89 +1,171 @@
 # game-translate
 
-A small, fast English-to-Chinese game dialogue translator for Hyprland. It captures a user-selected Wayland region directly into memory, waits for the image to settle, runs Tesseract OCR, suppresses near-duplicate text, and translates new dialogue.
+一个面向 Hyprland 的实时游戏字幕翻译工具。它直接跟踪游戏窗口，在画面稳定后执行 OCR，并通过本地 Ollama 模型把英文对白翻译成简体中文。
 
-The first supported setup is Pokémon Infinite Fusion running under Proton on Hyprland.
+项目目前优先支持通过 Proton 运行的《Pokémon Infinite Fusion》。核心程序使用 Rust 编写，截图和翻译均在本机完成，不上传游戏画面。
 
-## How it works
+> A fast, local-first English-to-Chinese game dialogue translator for Hyprland, written in Rust.
 
-1. `slurp` selects either a dialogue region or an entire program window.
-2. Hyprland IPC binds that selection to its source window, so tiled-window movement cannot redirect capture to another application.
-3. A vendored `libwayshot` 0.9 captures the translated region through the wlroots screencopy protocol without temporary screenshot files. Its frame lifecycle is patched to destroy every Wayland capture object after use; the upstream ext-image-copy output path is removed because it leaks compositor-owned shared buffers during continuous capture.
-4. A sampled-pixel state machine waits for three stable frames, then a second OCR pass confirms that typewriter text is complete.
-5. Tesseract TSV confidence rejects low-quality noise; normalized Levenshtein similarity suppresses OCR jitter and repeated dialogue.
-6. Known battle templates use canonical Pokémon terminology; other dialogue is translated locally by Qwen through Ollama on a worker thread.
+![game-translate 运行效果](assets/demo.png)
 
-## Requirements
+## 特性
 
-- Hyprland with the wlroots screencopy protocol
-- Rust 1.85 or newer
+- **跟踪游戏窗口**：选择一次程序窗口，之后窗口移动、缩放或切换布局时自动更新捕获区域。
+- **不会误译其他程序**：绑定 Hyprland 窗口地址；目标窗口不在当前工作区时自动暂停。
+- **为游戏对白优化的 OCR**：忽略画面中央的动画区域，分别分析顶部气泡和底部对话框。
+- **像素字体多尺度识别**：低置信度文本会用 2× 最近邻缩放再次识别，改善低分辨率像素字体。
+- **等待文字完整显示**：画面稳定后再识别，并使用第二次 OCR 确认打字机动画已经结束。
+- **本地翻译**：通过 Ollama 运行 `qwen3:4b-instruct`，游戏画面和对白不会发送到云端。
+- **宝可梦术语**：常见战斗模板使用固定术语，其余文本由模型结合术语提示翻译。
+- **两级缓存**：256 条内存缓存加不限于内存容量的 SSD 文件缓存，重复对白可立即返回。
+- **持续捕获不泄漏**：项目内置修正后的 `libwayshot`，显式释放每一帧 Wayland 捕获对象。
+
+## 工作流程
+
+```text
+游戏窗口
+   ↓ Hyprland IPC 跟踪位置
+Wayland 内存截图
+   ↓ 稳定帧检测
+顶部/底部 HUD OCR
+   ↓ 置信度、多尺度与二次确认
+去重与宝可梦术语模板
+   ↓
+内存缓存 → 文件缓存 → 本地 Ollama
+   ↓
+终端实时显示原文和译文
+```
+
+截图不会写入磁盘。只有运行日志和翻译缓存保存在 `~/.local/state/game-translate/`。
+
+## 系统要求
+
+- Hyprland，并支持 wlroots screencopy 协议
+- Rust 1.85+
 - `slurp`
-- `tesseract` with English language data
-- Ollama running locally with `qwen3:4b-instruct`
-- `kitty`, `jq`, and `hyprctl` for the included toggle script
+- Tesseract 及英文语言数据
+- Ollama 与 `qwen3:4b-instruct`
+- `kitty`、`jq`、`hyprctl`（启动脚本需要）
 
-On Arch Linux:
+Arch Linux 可先安装基础依赖：
 
 ```sh
-sudo pacman -S --needed rust slurp tesseract tesseract-data-eng kitty jq
+sudo pacman -S --needed rust slurp tesseract tesseract-data-eng kitty jq ollama
 ollama pull qwen3:4b-instruct
 ```
 
-## Build and install
+如果发行版提供 systemd 服务，确保 Ollama 已经运行：
 
 ```sh
+sudo systemctl enable --now ollama
+```
+
+不同发行版的 Ollama 服务名称可能不同，也可以直接运行 `ollama serve`。
+
+## 构建与安装
+
+```sh
+git clone https://github.com/675076143/game-translate.git
+cd game-translate
 cargo build --release
 install -Dm755 target/release/game-translate ~/.local/bin/game-translate
 install -Dm755 game-translate-toggle ~/.local/bin/game-translate-toggle
 ```
 
-Region mode follows a text rectangle relative to the selected game window:
+启动脚本会打开一个标题为 `GT-Translate` 的 kitty 窗口；再次执行同一命令会关闭它。
 
-```sh
-game-translate-toggle
-```
+## 使用方式
 
-Select only the dialogue text area and avoid the dialogue-box border.
-
-Window mode follows one program window in its entirety, even when it moves, resizes, or changes workspace:
+### 推荐：跟踪整个游戏窗口
 
 ```sh
 game-translate-toggle --window
 ```
 
-Click the game window once. Capture pauses whenever that window is not on an active workspace, so another program can never replace it at the same screen coordinates.
+启动后点击一次游戏窗口。程序会：
 
-In window mode, the top and bottom HUD bands drive both change detection and OCR. The two OCR candidates are ranked by confidence, sentence completeness, and useful word count, so top speech bubbles and bottom dialogue panels share one deterministic pipeline while the animated center of the scene is ignored.
+1. 绑定所选 Hyprland 窗口；
+2. 自动跟随其位置和尺寸；
+3. 在窗口离开活动工作区时暂停；
+4. 窗口恢复可见后继续识别。
 
-## Test
+这是日常使用的推荐方式，也能避免相同屏幕坐标后来被其他程序占用时发生误翻译。
+
+### 手动框选字幕区域
+
+```sh
+game-translate-toggle
+# 等价于：game-translate-toggle --region
+```
+
+只框选对白文字，不要包含对话框边框。该区域仍会绑定到其所在窗口并随窗口移动。
+
+## 平铺窗口建议
+
+`GT-Translate` 是普通平铺窗口。为了不压缩游戏画面，建议先聚焦希望放置翻译输出的列，再启动工具。例如将游戏保持在左侧全高，让翻译窗口与终端在右侧上下平铺。
+
+启动脚本使用独立 Wayland class `GT-Translate`，可以在自己的 Hyprland 配置中为它设置布局规则，但项目不会强制浮动或改动用户布局。
+
+## 数据、缓存与日志
+
+| 路径 | 用途 |
+| --- | --- |
+| `~/.local/state/game-translate/game-translate.log` | OCR、翻译来源和耗时诊断 |
+| `~/.local/state/game-translate/translations.jsonl` | 跨重启翻译缓存 |
+
+日志超过 1 MiB 后会在下次启动时清空。翻译缓存是追加写入的 JSON Lines 文件，适合 SSD；删除它即可清空历史翻译。
+
+运行性能摘要：
+
+```sh
+cargo run --release --example perf_summary -- \
+  ~/.local/state/game-translate/game-translate.log
+```
+
+## 常见问题
+
+### 启动后没有输出
+
+- `--window` 模式需要点击一次游戏窗口。
+- 检查 Ollama：`ollama list` 中应存在 `qwen3:4b-instruct`。
+- 查看日志：`tail -f ~/.local/state/game-translate/game-translate.log`。
+- 如果日志显示“游戏窗口不可见”，切回游戏所在工作区。
+
+### OCR 有少量错字
+
+像素字体、打字机动画和半透明对话框都会影响 Tesseract。程序会执行稳定帧确认和低置信多尺度 OCR，翻译提示也会纠正常见 OCR 错字，但不会保证每个英文字符都完全正确。
+
+### 翻译窗口压缩了游戏
+
+这是平铺布局的正常行为。关闭翻译窗口，先聚焦另一列中的窗口，再重新启动，让 `GT-Translate` 插入目标列。
+
+### 如何停止
+
+再次运行相同启动命令，或直接关闭 `GT-Translate` 窗口。
+
+## 开发与验证
 
 ```sh
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-The OCR regression tests invoke the system `tesseract` executable.
+OCR 回归测试会调用系统中的 Tesseract。
 
-The capture stress probe accepts a frame count. After it finishes, the compositor's `RssShmem` should return to its starting value:
+连续捕获压力测试：
 
 ```sh
 cargo run --release --example capture_probe -- '0,0 1280x720' 1000
 ```
 
-Runtime diagnostics are written to `~/.local/state/game-translate/game-translate.log`. The file is truncated on startup after it exceeds 1 MiB; screenshots are never logged.
+测试结束后，Hyprland 的 `RssShmem` 应回到开始前的水平。
 
-Translations use a 256-entry memory cache backed by an append-only SSD cache at `~/.local/state/game-translate/translations.jsonl`. Repeated dialogue is served without model inference, including across restarts.
+## 当前范围
 
-Summarize measured translation latency with:
+当前版本有意保持单一实现：一个 Wayland 捕获后端、一个 OCR 引擎、一个英译中方向和一个终端输出界面。暂不支持 X11、Windows、macOS、云端翻译服务或图形化设置界面。
 
-```sh
-cargo run --release --example perf_summary -- ~/.local/state/game-translate/game-translate.log
-```
-
-## Scope
-
-This version deliberately has one capture backend, one OCR engine, one language pair, and one output UI. It does not include legacy Python paths, fallback capture commands, migration code, or speculative configuration layers.
+设计与排障过程见：[从游戏画面到中文字幕：用 Rust 构建本地实时 OCR 翻译器](docs/blog/building-a-local-game-translator.md)。
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use image::{DynamicImage, GenericImage, ImageFormat};
+use image::{DynamicImage, GenericImage, ImageFormat, imageops::FilterType};
 
 const MIN_RESULT_CONFIDENCE: f32 = 45.0;
 
@@ -68,6 +68,47 @@ fn dialogue_score(result: &OcrResult) -> f32 {
 }
 
 pub fn recognize(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
+    let original = recognize_prepared(&image.grayscale(), block_text);
+    if original
+        .as_ref()
+        .is_ok_and(|result| result.confidence >= 70.0)
+    {
+        return original;
+    }
+
+    let scaled =
+        image
+            .grayscale()
+            .resize_exact(image.width() * 2, image.height() * 2, FilterType::Nearest);
+    let enlarged = recognize_prepared(&scaled, block_text);
+    match (original, enlarged) {
+        (Ok(original), Ok(enlarged)) => Ok(
+            if starts_lowercase(&original.text) && starts_uppercase(&enlarged.text) {
+                enlarged
+            } else {
+                original
+            },
+        ),
+        (Ok(result), Err(_)) | (Err(_), Ok(result)) => Ok(result),
+        (Err(original), Err(enlarged)) => {
+            bail!("original: {original:#}; enlarged: {enlarged:#}")
+        }
+    }
+}
+
+fn starts_lowercase(text: &str) -> bool {
+    text.chars()
+        .find(|c| c.is_alphabetic())
+        .is_some_and(char::is_lowercase)
+}
+
+fn starts_uppercase(text: &str) -> bool {
+    text.chars()
+        .find(|c| c.is_alphabetic())
+        .is_some_and(char::is_uppercase)
+}
+
+fn recognize_prepared(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
     let mut png = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut png, ImageFormat::Png)
@@ -236,6 +277,27 @@ mod tests {
         assert_eq!(
             recognize(&image, false).unwrap().text,
             "We restore your tired Pokémon to full health."
+        );
+    }
+
+    #[test]
+    fn recognizes_red_dialogue_after_grayscale_conversion() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/red-dialogue.png");
+        let image = image::open(fixture).unwrap();
+        assert_eq!(
+            recognize(&image, true).unwrap().text,
+            "We've restored your Pokémon to full hiealth."
+        );
+    }
+
+    #[test]
+    fn retries_low_confidence_pixel_text_at_double_scale() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/red-we-restore.png");
+        let image = image::open(fixture).unwrap();
+        assert_eq!(
+            recognize(&image, true).unwrap().text,
+            "We restore your tired Pokemon to Tull health."
         );
     }
 }
