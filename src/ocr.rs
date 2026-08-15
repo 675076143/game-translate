@@ -95,7 +95,7 @@ fn dialogue_panel(image: &DynamicImage) -> Option<DynamicImage> {
         return None;
     }
 
-    let padding = (height / 40).max(8);
+    let padding = (height / 20).max(8);
     let top = best.0.saturating_sub(padding);
     let bottom = (best.1 + padding).min(height);
     Some(DynamicImage::ImageRgb8(rgb).crop_imm(0, top as u32, width as u32, (bottom - top) as u32))
@@ -133,11 +133,10 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
         .into_iter()
         .filter_map(|line| {
             let text = line.words.join(" ");
-            (text.chars().filter(|c| c.is_alphanumeric()).count() >= 2).then_some((
-                text,
-                line.confidence_total,
-                line.word_count,
-            ))
+            let confidence = line.confidence_total / line.word_count as f32;
+            (text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
+                && confidence >= MIN_RESULT_CONFIDENCE)
+                .then_some((text, line.confidence_total, line.word_count))
         })
         .collect();
     let count: usize = accepted.iter().map(|line| line.2).sum();
@@ -167,6 +166,8 @@ mod tests {
     fn parses_lines_and_drops_isolated_noise() {
         let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
 5\t1\t1\t1\t1\t1\t0\t0\t1\t1\t80\tR\n\
+5\t1\t3\t1\t1\t1\t0\t0\t1\t1\t1\tborder\n\
+5\t1\t3\t1\t1\t2\t0\t0\t1\t1\t1\tnoise\n\
 5\t1\t2\t1\t1\t1\t0\t0\t1\t1\t90\tHello\n\
 5\t1\t2\t1\t1\t2\t0\t0\t1\t1\t90\tworld!\n";
         let result = parse_tsv(tsv).unwrap();
