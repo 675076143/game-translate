@@ -42,6 +42,11 @@ fn main() {
 
 fn run() -> Result<()> {
     let log_path = logger::init()?;
+    let cache_path = log_path
+        .parent()
+        .context("日志路径没有父目录")?
+        .join("translations.jsonl");
+    let (translation_tx, translation_rx) = translation_worker(cache_path);
     print_status("等待平铺布局稳定…");
     thread::sleep(LAYOUT_SETTLE);
     let (tracker, detect_panel) = match env::args().nth(1).as_deref() {
@@ -60,11 +65,6 @@ fn run() -> Result<()> {
     let mut stability = StabilityDetector::new();
     let mut confirmer = CandidateConfirmer::new();
     let mut dedup = TextDeduplicator::default();
-    let cache_path = log_path
-        .parent()
-        .context("日志路径没有父目录")?
-        .join("translations.jsonl");
-    let (translation_tx, translation_rx) = translation_worker(cache_path);
     let mut next_window_refresh = Instant::now() + WINDOW_REFRESH_INTERVAL;
     let mut window_visible = true;
     let mut change_started = None;

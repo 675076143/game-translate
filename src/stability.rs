@@ -3,7 +3,6 @@ use image::{DynamicImage, GenericImageView};
 const SAMPLE_STEP: usize = 4;
 const PIXEL_DELTA: u8 = 18;
 const CHANGE_RATIO: f32 = 0.010;
-const STABLE_RATIO: f32 = 0.0015;
 const REQUIRED_STABLE_FRAMES: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +52,7 @@ impl StabilityDetector {
             | State::Changing { stable_frames } => {
                 if difference >= CHANGE_RATIO {
                     (State::Changing { stable_frames: 0 }, FrameEvent::None)
-                } else if difference <= STABLE_RATIO {
+                } else {
                     let stable_frames = stable_frames + 1;
                     if stable_frames >= REQUIRED_STABLE_FRAMES {
                         (State::Idle, FrameEvent::Stable)
@@ -66,8 +65,6 @@ impl StabilityDetector {
                         };
                         (state, FrameEvent::None)
                     }
-                } else {
-                    (State::Changing { stable_frames: 0 }, FrameEvent::None)
                 }
             }
         };
@@ -135,5 +132,20 @@ mod tests {
         assert_eq!(detector.update(&solid(240)), FrameEvent::None);
         assert_eq!(detector.update(&solid(240)), FrameEvent::None);
         assert_eq!(detector.update(&solid(240)), FrameEvent::Stable);
+    }
+
+    #[test]
+    fn tolerates_small_animated_regions() {
+        let mut detector = StabilityDetector::new();
+        for _ in 0..4 {
+            detector.update(&solid(20));
+        }
+        assert_eq!(detector.update(&solid(240)), FrameEvent::Changed);
+        let mut frame = solid(240).to_rgb8();
+        frame.put_pixel(0, 0, Rgb([20; 3]));
+        let animated = DynamicImage::ImageRgb8(frame);
+        assert_eq!(detector.update(&animated), FrameEvent::None);
+        assert_eq!(detector.update(&solid(240)), FrameEvent::None);
+        assert_eq!(detector.update(&animated), FrameEvent::Stable);
     }
 }
