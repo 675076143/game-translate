@@ -150,7 +150,12 @@ fn run() -> Result<()> {
             speculative = None;
         } else if event == FrameEvent::Stable {
             let ocr_started = Instant::now();
-            match ocr::recognize(&focused, detect_panel) {
+            let recognition = if detect_panel {
+                ocr::recognize_window(&frame)
+            } else {
+                ocr::recognize(&focused, false)
+            };
+            match recognition {
                 Ok(result) => {
                     logger::write(
                         "ocr-candidate",
@@ -189,7 +194,7 @@ fn run() -> Result<()> {
             }
         } else if confirmer.is_due(Instant::now()) {
             confirm_candidate(
-                &focused,
+                &frame,
                 &mut confirmer,
                 &mut dedup,
                 &translation_tx,
@@ -236,10 +241,15 @@ fn confirm_candidate(
     buffered: &mut HashMap<u64, TranslationOutcome>,
     event_started: &mut HashMap<u64, Instant>,
     change_started: &mut Option<Instant>,
-    block_text: bool,
+    window_mode: bool,
 ) -> Result<()> {
     let ocr_started = Instant::now();
-    match ocr::recognize(frame, block_text) {
+    let recognition = if window_mode {
+        ocr::recognize_window(frame)
+    } else {
+        ocr::recognize(frame, false)
+    };
+    match recognition {
         Ok(result) => {
             logger::write(
                 "ocr-confirm",

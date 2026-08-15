@@ -53,7 +53,7 @@ game-translate-toggle --window
 
 Click the game window once. Capture pauses whenever that window is not on an active workspace, so another program can never replace it at the same screen coordinates.
 
-In window mode, the same detected dialogue panel drives both change detection and OCR. Animated sprites and scenery therefore do not dilute text changes or pollute recognition.
+In window mode, the top and bottom HUD bands drive both change detection and OCR. The two OCR candidates are ranked by confidence, sentence completeness, and useful word count, so top speech bubbles and bottom dialogue panels share one deterministic pipeline while the animated center of the scene is ignored.
 
 ## Test
 

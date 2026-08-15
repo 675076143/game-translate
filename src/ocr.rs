@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use image::{DynamicImage, ImageFormat};
+use image::{DynamicImage, GenericImage, ImageFormat};
 
 const MIN_RESULT_CONFIDENCE: f32 = 45.0;
 
@@ -24,11 +24,47 @@ struct OcrLine {
 
 pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> {
     if detect_panel {
-        let top = image.height() * 55 / 100;
-        let bottom = image.height() * 98 / 100;
-        return Cow::Owned(image.crop_imm(0, top, image.width(), bottom - top));
+        let top_height = image.height() * 40 / 100;
+        let bottom_y = image.height() * 55 / 100;
+        let bottom_height = image.height() * 43 / 100;
+        let mut hud = DynamicImage::new_rgba8(image.width(), top_height + bottom_height);
+        hud.copy_from(&image.crop_imm(0, 0, image.width(), top_height), 0, 0)
+            .expect("HUD top band dimensions must match");
+        hud.copy_from(
+            &image.crop_imm(0, bottom_y, image.width(), bottom_height),
+            0,
+            top_height,
+        )
+        .expect("HUD bottom band dimensions must match");
+        return Cow::Owned(hud);
     }
     Cow::Borrowed(image)
+}
+
+pub fn recognize_window(image: &DynamicImage) -> Result<OcrResult> {
+    let top_height = image.height() * 40 / 100;
+    let bottom_y = image.height() * 55 / 100;
+    let bottom_height = image.height() * 43 / 100;
+    let top = recognize(&image.crop_imm(0, 0, image.width(), top_height), true);
+    let bottom = recognize(
+        &image.crop_imm(0, bottom_y, image.width(), bottom_height),
+        true,
+    );
+    match (top, bottom) {
+        (Ok(top), Ok(bottom)) => Ok(if dialogue_score(&top) >= dialogue_score(&bottom) {
+            top
+        } else {
+            bottom
+        }),
+        (Ok(result), Err(_)) | (Err(_), Ok(result)) => Ok(result),
+        (Err(top), Err(bottom)) => bail!("top HUD: {top:#}; bottom HUD: {bottom:#}"),
+    }
+}
+
+fn dialogue_score(result: &OcrResult) -> f32 {
+    let words = result.text.split_whitespace().count().min(10) as f32;
+    let complete = f32::from(result.text.ends_with(['.', '!', '?'])) * 10.0;
+    result.confidence + words * 3.0 + complete
 }
 
 pub fn recognize(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
@@ -113,7 +149,9 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
         .filter_map(|line| {
             let text = line.words.join(" ");
             let confidence = line.confidence_total / line.word_count as f32;
-            (text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
+            let dialogue_line = line.word_count >= 2 || text.ends_with(['.', '!', '?']);
+            (dialogue_line
+                && text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
                 && confidence >= MIN_RESULT_CONFIDENCE)
                 .then_some((text, line.confidence_total, line.word_count))
         })
@@ -162,12 +200,12 @@ mod tests {
     }
 
     #[test]
-    fn selects_the_bottom_dialogue_band_regardless_of_color() {
+    fn selects_top_and_bottom_hud_bands_regardless_of_color() {
         let image = RgbImage::from_pixel(400, 400, Rgb([30, 30, 30]));
         let image = DynamicImage::ImageRgb8(image);
         let panel = focus(&image, true);
         assert_eq!(panel.width(), 400);
-        assert_eq!(panel.height(), 172);
+        assert_eq!(panel.height(), 332);
     }
 
     #[test]
