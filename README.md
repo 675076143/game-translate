@@ -2,11 +2,19 @@
 
 一个面向 Hyprland 的实时游戏字幕翻译工具。它直接跟踪游戏窗口，在画面稳定后执行 OCR，并通过本地 Ollama 模型把英文对白翻译成简体中文。
 
-项目目前优先支持通过 Proton 运行的《Pokémon Infinite Fusion》。核心程序使用 Rust 编写，截图和翻译均在本机完成，不上传游戏画面。
+项目已在通过 Proton 运行的《Pokémon Infinite Fusion》和《Bayonetta》中实测。两者的像素字体、衬线字体、背景和 UI 布局差异很大，程序不依赖特定游戏的固定字幕坐标。核心程序使用 Rust 编写，截图、OCR 和翻译均在本机完成，不上传游戏画面。
 
 > A fast, local-first English-to-Chinese game dialogue translator for Hyprland, written in Rust.
 
-![game-translate 运行效果](assets/demo.png)
+### 《Pokémon Infinite Fusion》
+
+![game-translate 翻译 Pokémon Infinite Fusion](assets/demo.png)
+
+### 《Bayonetta》
+
+![game-translate 翻译 Bayonetta](assets/bayonetta-demo.png)
+
+《Bayonetta》的对白使用写实背景上的衬线字体。RapidOCR 能从游戏窗口中恢复多行英文说明，并在普通平铺窗口中持续输出中英对照；旁边的 Steam 窗口不会进入捕获范围。
 
 ## 特性
 
@@ -30,9 +38,9 @@
    ↓ Hyprland IPC 跟踪位置
 Wayland 内存截图
    ↓ 稳定帧检测
-顶部/底部 HUD OCR
-   ↓ 单色提取、置信度与按需候选
-去重与宝可梦术语模板
+RapidOCR 文字检测与识别
+   ↓ 坐标排序、文本块组合与 UI 过滤
+去重与游戏术语模板
    ↓
 内存缓存 → 文件缓存 → 本地 Ollama
    ↓
