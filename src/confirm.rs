@@ -70,6 +70,8 @@ mod tests {
         OcrResult {
             text: text.into(),
             confidence: 90.0,
+            line_count: 1,
+            word_confidences: vec![90.0; text.split_whitespace().count()],
         }
     }
 

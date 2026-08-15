@@ -13,6 +13,8 @@ const MIN_RESULT_CONFIDENCE: f32 = 45.0;
 pub struct OcrResult {
     pub text: String,
     pub confidence: f32,
+    pub line_count: usize,
+    pub word_confidences: Vec<f32>,
 }
 
 struct OcrLine {
@@ -20,6 +22,7 @@ struct OcrLine {
     words: Vec<String>,
     confidence_total: f32,
     word_count: usize,
+    word_confidences: Vec<f32>,
 }
 
 pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> {
@@ -67,6 +70,21 @@ fn dialogue_score(result: &OcrResult) -> f32 {
     result.confidence + words * 3.0 + complete
 }
 
+fn validate_dialogue(result: OcrResult) -> Result<OcrResult> {
+    let words: Vec<_> = result.text.split_whitespace().collect();
+    let contains_url = words.iter().any(|word| {
+        word.starts_with("http://") || word.starts_with("https://") || word.starts_with("www.")
+    });
+    if result.line_count > 6 || words.len() > 80 || contains_url {
+        bail!(
+            "OCR result rejected as non-dialogue (lines={} words={} url={contains_url})",
+            result.line_count,
+            words.len()
+        );
+    }
+    Ok(result)
+}
+
 pub fn recognize(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
     let original = recognize_prepared(&image.grayscale(), block_text);
     if original
@@ -84,7 +102,11 @@ pub fn recognize(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
     match (original, enlarged) {
         (Ok(original), Ok(enlarged)) => Ok(
             if starts_lowercase(&original.text) && starts_uppercase(&enlarged.text) {
-                enlarged
+                if original.word_confidences.len() == enlarged.word_confidences.len() {
+                    merge_words(original, enlarged)
+                } else {
+                    enlarged
+                }
             } else {
                 original
             },
@@ -93,6 +115,43 @@ pub fn recognize(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
         (Err(original), Err(enlarged)) => {
             bail!("original: {original:#}; enlarged: {enlarged:#}")
         }
+    }
+}
+
+fn merge_words(original: OcrResult, enlarged: OcrResult) -> OcrResult {
+    let original_words = original.text.split_whitespace();
+    let enlarged_words = enlarged.text.split_whitespace();
+    let words: Vec<_> = original_words
+        .zip(enlarged_words)
+        .zip(
+            original
+                .word_confidences
+                .iter()
+                .zip(&enlarged.word_confidences),
+        )
+        .map(
+            |((original, enlarged), (original_confidence, enlarged_confidence))| {
+                let preserves_diacritics = !original.is_ascii() && enlarged.is_ascii();
+                if !preserves_diacritics && enlarged_confidence > original_confidence {
+                    enlarged
+                } else {
+                    original
+                }
+            },
+        )
+        .collect();
+    let word_confidences: Vec<_> = original
+        .word_confidences
+        .iter()
+        .zip(&enlarged.word_confidences)
+        .map(|(original, enlarged)| original.max(*enlarged))
+        .collect();
+    let confidence = word_confidences.iter().sum::<f32>() / word_confidences.len() as f32;
+    OcrResult {
+        text: words.join(" "),
+        confidence,
+        line_count: original.line_count.max(enlarged.line_count),
+        word_confidences,
     }
 }
 
@@ -175,12 +234,14 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
             line.words.push(text);
             line.confidence_total += confidence;
             line.word_count += 1;
+            line.word_confidences.push(confidence);
         } else {
             lines.push(OcrLine {
                 key,
                 words: vec![text],
                 confidence_total: confidence,
                 word_count: 1,
+                word_confidences: vec![confidence],
             });
         }
     }
@@ -194,11 +255,21 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
             (dialogue_line
                 && text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
                 && confidence >= MIN_RESULT_CONFIDENCE)
-                .then_some((text, line.confidence_total, line.word_count))
+                .then_some((
+                    text,
+                    line.confidence_total,
+                    line.word_count,
+                    line.word_confidences,
+                ))
         })
         .collect();
     let count: usize = accepted.iter().map(|line| line.2).sum();
     let confidence = accepted.iter().map(|line| line.1).sum::<f32>() / count.max(1) as f32;
+    let line_count = accepted.len();
+    let word_confidences = accepted
+        .iter()
+        .flat_map(|line| line.3.iter().copied())
+        .collect();
     let text = accepted
         .into_iter()
         .map(|line| line.0)
@@ -209,7 +280,12 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
     if text.is_empty() || !looks_like_dialogue || confidence < MIN_RESULT_CONFIDENCE {
         bail!("OCR result rejected (confidence {confidence:.1})");
     }
-    Ok(OcrResult { text, confidence })
+    validate_dialogue(OcrResult {
+        text,
+        confidence,
+        line_count,
+        word_confidences,
+    })
 }
 
 #[cfg(test)]
@@ -238,6 +314,28 @@ mod tests {
         let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
 5\t1\t1\t1\t1\t1\t0\t0\t1\t1\t90\tFout\n";
         assert!(parse_tsv(tsv).is_err());
+    }
+
+    #[test]
+    fn rejects_urls_from_other_applications() {
+        let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+5\t1\t1\t1\t1\t1\t0\t0\t1\t1\t90\tOpen\n\
+5\t1\t1\t1\t1\t2\t0\t0\t1\t1\t90\thttps://example.com\n";
+        assert!(parse_tsv(tsv).is_err());
+    }
+
+    #[test]
+    fn rejects_dense_multiline_desktop_text() {
+        let mut tsv = String::from(
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n",
+        );
+        for line in 1..=7 {
+            tsv.push_str(&format!(
+                "5\t1\t1\t1\t{line}\t1\t0\t0\t1\t1\t90\tTerminal\n\
+                 5\t1\t1\t1\t{line}\t2\t0\t0\t1\t1\t90\toutput\n"
+            ));
+        }
+        assert!(parse_tsv(&tsv).is_err());
     }
 
     #[test]

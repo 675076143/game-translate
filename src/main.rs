@@ -26,6 +26,7 @@ use ocr::OcrResult;
 use output::{print_error, print_status, print_translation};
 use stability::{FrameEvent, StabilityDetector};
 use translate::{TranslationJob, TranslationOutcome, Translator};
+use window::WindowState;
 
 const LAYOUT_SETTLE: Duration = Duration::from_millis(1_500);
 const ACTIVE_INTERVAL: Duration = Duration::from_millis(80);
@@ -60,7 +61,20 @@ fn run() -> Result<()> {
         }
         Some(_) => bail!("usage: game-translate [--region|--window]"),
     };
-    let mut geometry = tracker.geometry()?.context("游戏窗口当前不可见")?;
+    let mut waiting_for_window = false;
+    let mut geometry = loop {
+        match tracker.state()? {
+            WindowState::Visible(geometry) => break geometry,
+            WindowState::Hidden => {
+                if !waiting_for_window {
+                    print_status("游戏窗口当前不可见，等待恢复");
+                    waiting_for_window = true;
+                }
+                thread::sleep(IDLE_INTERVAL);
+            }
+            WindowState::Closed => bail!("选中的游戏窗口已关闭"),
+        }
+    };
     let mut capture = Capture::new(geometry)?;
     let mut stability = StabilityDetector::new();
     let mut confirmer = CandidateConfirmer::new();
@@ -95,8 +109,8 @@ fn run() -> Result<()> {
 
         if Instant::now() >= next_window_refresh {
             next_window_refresh = Instant::now() + WINDOW_REFRESH_INTERVAL;
-            match tracker.geometry()? {
-                Some(updated) => {
+            match tracker.state()? {
+                WindowState::Visible(updated) => {
                     if !window_visible {
                         print_status("游戏窗口已恢复，继续监视");
                         window_visible = true;
@@ -116,7 +130,7 @@ fn run() -> Result<()> {
                         );
                     }
                 }
-                None => {
+                WindowState::Hidden => {
                     if window_visible {
                         print_status("游戏窗口不可见，已暂停识别");
                         window_visible = false;
@@ -133,7 +147,23 @@ fn run() -> Result<()> {
                     );
                     continue;
                 }
+                WindowState::Closed => {
+                    print_status("目标游戏窗口已关闭");
+                    return Ok(());
+                }
             }
+        }
+
+        if !window_visible {
+            wait_for_translation(
+                &translation_rx,
+                next_window_refresh.saturating_duration_since(Instant::now()),
+                latest_confirmed,
+                None,
+                &mut buffered,
+                &mut event_started,
+            );
+            continue;
         }
 
         let iteration_started = Instant::now();
@@ -443,6 +473,8 @@ mod tests {
         let result = |text: &str, confidence| OcrResult {
             text: text.into(),
             confidence,
+            line_count: 1,
+            word_confidences: vec![confidence; text.split_whitespace().count()],
         };
         assert!(is_speculative_candidate(&result("Hello!", 60.0)));
         assert!(!is_speculative_candidate(&result("Hello", 90.0)));

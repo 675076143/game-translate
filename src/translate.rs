@@ -144,6 +144,7 @@ Pokémon Center=宝可梦中心，Poké Mart=友好商店。\n{original}"
                 "keep_alive": "30m",
                 "options": {
                     "temperature": 0,
+                    "num_ctx": 2048,
                     "num_predict": 100
                 }
             }))
