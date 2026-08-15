@@ -309,6 +309,7 @@ name = "game-translate"
 version = "0.6.0"
 dependencies = [
  "anyhow",
+ "base64",
  "image",
  "libwayshot",
  "reqwest",

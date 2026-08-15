@@ -46,6 +46,7 @@ fn run() -> Result<()> {
         .context("日志路径没有父目录")?
         .join("translations.jsonl");
     let (translation_tx, translation_rx) = translation_worker(cache_path);
+    let mut ocr_engine = ocr::OcrEngine::new()?;
     print_status("等待平铺布局稳定…");
     thread::sleep(LAYOUT_SETTLE);
     let (tracker, detect_panel) = match env::args().nth(1).as_deref() {
@@ -165,11 +166,7 @@ fn run() -> Result<()> {
             }
         } else if event == FrameEvent::Stable {
             let ocr_started = Instant::now();
-            let recognition = if detect_panel {
-                ocr::recognize_window(&frame)
-            } else {
-                ocr::recognize(&focused, false)
-            };
+            let recognition = ocr_engine.recognize(&frame);
             match recognition {
                 Ok(result) => {
                     logger::write(
@@ -385,8 +382,6 @@ mod tests {
         OcrResult {
             text: text.into(),
             confidence,
-            line_count: 1,
-            word_confidences: vec![confidence; text.split_whitespace().count()],
         }
     }
 

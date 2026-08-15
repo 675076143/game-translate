@@ -12,13 +12,11 @@
 
 - **跟踪游戏窗口**：选择一次程序窗口，之后窗口移动、缩放或切换布局时自动更新捕获区域。
 - **不会误译其他程序**：绑定 Hyprland 窗口地址；目标不在活动工作区、滚出显示器视口或被隐藏时立即暂停。
-- **为游戏对白优化的 OCR**：忽略画面中央的动画区域，分别分析顶部气泡和底部对话框。
-- **像素字体多尺度识别**：低置信度文本会用 2× 最近邻缩放再次识别，改善低分辨率像素字体。
-- **OCR 安全门**：过滤超长、高密度多行、URL、符号堆积和重复单字符，明显非游戏对白不会进入翻译或缓存。
+- **场景文字 OCR**：RapidOCR/PP-OCRv6 先检测文字框，再识别描边像素字、彩色文字和复杂背景中的对白。
+- **自动组合多行对白**：按文字框坐标恢复阅读顺序，从复杂 UI 中选择连续对白块，不依赖某款游戏的固定字幕位置。
+- **OCR 安全门**：过滤低置信度、超长、URL、短 UI 标签和全大写操作按钮，明显非对白不会进入翻译或缓存。
 - **等待文字完整显示**：连续三帧稳定后只执行一次 OCR；候选还需保持 350ms 不变，打字机动画继续时会取消提交。
-- **单色文字提取**：窗口模式收窄到上下对话区域，并通过最大颜色通道、Otsu 阈值和二值化保留白色与彩色高亮文字。
-- **完整多行对话**：底部识别区域覆盖到窗口高度的 98%，不会截掉贴近窗口底部的第二行。
-- **招式菜单识别**：自动识别红色招式管理界面，分开读取右侧招式列表和左侧说明区。
+- **完整多行对话**：同一文本块中的多行按画面坐标合并，不会只输出第一行。
 - **战斗消息快速提交**：完整战斗句不再等待 350ms，避免游戏快速翻页时取消正确结果。
 - **本地翻译**：通过 Ollama 运行 `qwen3:4b-instruct`，游戏画面和对白不会发送到云端。
 - **宝可梦术语**：常见战斗模板使用固定术语，其余文本由模型结合术语提示翻译。
@@ -47,15 +45,15 @@ Wayland 内存截图
 
 - Hyprland，并支持 wlroots screencopy 协议
 - Rust 1.85+
+- `uv`（安装隔离的 RapidOCR 运行环境）
 - `slurp`
-- Tesseract 及英文语言数据
 - Ollama 与 `qwen3:4b-instruct`
 - `kitty`、`jq`、`hyprctl`（启动脚本需要）
 
 Arch Linux 可先安装基础依赖：
 
 ```sh
-sudo pacman -S --needed rust slurp tesseract tesseract-data-eng kitty jq ollama
+sudo pacman -S --needed rust uv slurp kitty jq ollama
 ollama pull qwen3:4b-instruct
 ```
 
@@ -72,9 +70,7 @@ sudo systemctl enable --now ollama
 ```sh
 git clone https://github.com/675076143/game-translate.git
 cd game-translate
-cargo build --release
-install -Dm755 target/release/game-translate ~/.local/bin/game-translate
-install -Dm755 game-translate-toggle ~/.local/bin/game-translate-toggle
+./setup install
 ```
 
 启动脚本会打开一个标题为 `GT-Translate` 的 kitty 窗口；再次执行同一命令会关闭它。
@@ -140,7 +136,7 @@ cargo run --release --example perf_summary -- \
 
 ### OCR 有少量错字
 
-像素字体、打字机动画和半透明对话框都会影响 Tesseract。程序会等待三帧稳定并延迟提交，窗口模式还会提取单色文字；翻译提示会纠正常见 OCR 错字，但不会保证每个英文字符都完全正确。
+RapidOCR 使用 PP-OCRv6 检测并识别场景文字，对描边像素字、不同位置的多行对白和复杂背景比传统 OCR 更稳。程序仍会等待画面稳定并延迟提交，以避开打字机动画；翻译提示会纠正常见 OCR 错字，但不会保证每个英文字符都完全正确。
 
 ### 翻译窗口压缩了游戏
 
@@ -157,7 +153,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-OCR 回归测试会调用系统中的 Tesseract。
+Rust 测试不需要加载 OCR 模型；`./setup install` 会安装固定版本的 RapidOCR 与 ONNX Runtime。
 
 连续捕获压力测试：
 

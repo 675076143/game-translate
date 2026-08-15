@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" != "install" ]]; then
+    echo "usage: ./setup install" >&2
+    exit 2
+fi
+
+command -v cargo >/dev/null || { echo "cargo is required" >&2; exit 1; }
+command -v uv >/dev/null || { echo "uv is required" >&2; exit 1; }
+
+data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/game-translate/ocr"
+bin_dir="${HOME}/.local/bin"
+
+cargo build --release
+if [[ ! -x "$data_dir/.venv/bin/python" ]]; then
+    uv venv --python 3.13 "$data_dir/.venv"
+fi
+uv pip install --python "$data_dir/.venv/bin/python" rapidocr==3.9.2 onnxruntime==1.28.0
+install -Dm755 target/release/game-translate "$bin_dir/game-translate"
+install -Dm755 game-translate-toggle "$bin_dir/game-translate-toggle"
+install -Dm755 ocr_worker.py "$data_dir/ocr_worker.py"
+
+echo "installed game-translate with RapidOCR"
