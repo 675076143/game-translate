@@ -10,6 +10,10 @@ use image::{DynamicImage, GenericImage, ImageFormat, imageops::FilterType};
 const MIN_RESULT_CONFIDENCE: f32 = 45.0;
 const MIN_LINE_CONFIDENCE: f32 = 25.0;
 const COLORED_TEXT_THRESHOLD: u8 = 179;
+const TOP_HEIGHT_PERCENT: u32 = 30;
+const BOTTOM_Y_PERCENT: u32 = 65;
+const BOTTOM_HEIGHT_PERCENT: u32 = 25;
+const EXTENDED_BOTTOM_HEIGHT_PERCENT: u32 = 33;
 
 #[derive(Debug, Clone)]
 pub struct OcrResult {
@@ -29,9 +33,9 @@ struct OcrLine {
 
 pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> {
     if detect_panel {
-        let top_height = image.height() * 30 / 100;
-        let bottom_y = image.height() * 65 / 100;
-        let bottom_height = image.height() * 25 / 100;
+        let top_height = image.height() * TOP_HEIGHT_PERCENT / 100;
+        let bottom_y = image.height() * BOTTOM_Y_PERCENT / 100;
+        let bottom_height = image.height() * EXTENDED_BOTTOM_HEIGHT_PERCENT / 100;
         let mut hud = DynamicImage::new_rgba8(image.width(), top_height + bottom_height);
         hud.copy_from(&image.crop_imm(0, 0, image.width(), top_height), 0, 0)
             .expect("HUD top band dimensions must match");
@@ -47,16 +51,40 @@ pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> 
 }
 
 pub fn recognize_window(image: &DynamicImage) -> Result<OcrResult> {
-    let top_height = image.height() * 30 / 100;
-    let bottom_y = image.height() * 65 / 100;
-    let bottom_height = image.height() * 25 / 100;
+    let top_height = image.height() * TOP_HEIGHT_PERCENT / 100;
+    let bottom_y = image.height() * BOTTOM_Y_PERCENT / 100;
+    let bottom_height = image.height() * BOTTOM_HEIGHT_PERCENT / 100;
     let top = recognize_panel(&image.crop_imm(0, 0, image.width(), top_height));
-    let bottom = recognize_panel(&image.crop_imm(
+    let standard_bottom = recognize_panel(&image.crop_imm(
         0,
         bottom_y,
         image.width(),
         bottom_height,
     ));
+    let bottom = if standard_bottom.as_ref().is_ok_and(is_complete_candidate) {
+        standard_bottom
+    } else {
+        let extended_height = image.height() * EXTENDED_BOTTOM_HEIGHT_PERCENT / 100;
+        let extended = recognize_panel(&image.crop_imm(
+            0,
+            bottom_y,
+            image.width(),
+            extended_height,
+        ));
+        match (standard_bottom, extended) {
+            (Ok(standard), Ok(extended)) => Ok(
+                if dialogue_score(&standard) >= dialogue_score(&extended) {
+                    standard
+                } else {
+                    extended
+                },
+            ),
+            (Ok(result), Err(_)) | (Err(_), Ok(result)) => Ok(result),
+            (Err(standard), Err(extended)) => {
+                bail!("standard bottom: {standard:#}; extended bottom: {extended:#}")
+            }
+        }
+    };
     match (top, bottom) {
         (Ok(top), Ok(bottom)) => Ok(if dialogue_score(&top) >= dialogue_score(&bottom) {
             top
@@ -541,7 +569,7 @@ mod tests {
         let image = DynamicImage::ImageRgb8(image);
         let panel = focus(&image, true);
         assert_eq!(panel.width(), 400);
-        assert_eq!(panel.height(), 220);
+        assert_eq!(panel.height(), 252);
     }
 
     #[test]
@@ -605,6 +633,16 @@ mod tests {
             recognize_window(&image).unwrap().text,
             "You put the Potion amay in the ANedicine Pocket."
         );
+    }
+
+    #[test]
+    fn recognizes_both_lines_near_the_window_bottom() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/trainer-battle-two-lines.png");
+        let image = image::open(fixture).unwrap();
+        let text = recognize_window(&image).unwrap().text;
+        assert!(text.contains("When you're having trouble in a trainer"), "{text}");
+        assert!(text.contains("allowed to forfeit"), "{text}");
     }
 
 }

@@ -306,7 +306,7 @@ dependencies = [
 
 [[package]]
 name = "game-translate"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "image",
