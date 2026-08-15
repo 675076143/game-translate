@@ -20,6 +20,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use capture::{Capture, Geometry};
 use dedup::TextDeduplicator;
+use ocr::OcrResult;
 use output::{print_error, print_status, print_translation};
 use stability::{FrameEvent, StabilityDetector};
 use translate::{TranslationJob, TranslationOutcome, Translator};
@@ -29,6 +30,7 @@ const LAYOUT_SETTLE: Duration = Duration::from_millis(1_500);
 const ACTIVE_INTERVAL: Duration = Duration::from_millis(80);
 const IDLE_INTERVAL: Duration = Duration::from_millis(200);
 const WINDOW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+const COMMIT_DELAY: Duration = Duration::from_millis(350);
 
 fn main() {
     if let Err(error) = run() {
@@ -79,6 +81,7 @@ fn run() -> Result<()> {
     let mut change_started = None;
     let mut next_event_id = 1_u64;
     let mut latest_confirmed = None;
+    let mut pending: Option<(OcrResult, Instant, Instant)> = None;
     let mut event_started = HashMap::new();
 
     print_status(&format!(
@@ -106,6 +109,7 @@ fn run() -> Result<()> {
                         capture.set_geometry(updated);
                         geometry = updated;
                         stability = StabilityDetector::new();
+                        pending = None;
                         logger::write(
                             "window",
                             &format!(
@@ -119,6 +123,7 @@ fn run() -> Result<()> {
                     if window_visible {
                         print_status("游戏窗口不可见，已暂停识别");
                         window_visible = false;
+                        pending = None;
                     }
                     wait_for_translation(
                         &translation_rx,
@@ -155,6 +160,9 @@ fn run() -> Result<()> {
         if event == FrameEvent::Changed {
             change_started = Some(Instant::now());
             logger::write("change", "detected");
+            if pending.take().is_some() {
+                logger::write("candidate-canceled", "text image changed before commit");
+            }
         } else if event == FrameEvent::Stable {
             let ocr_started = Instant::now();
             let recognition = if detect_panel {
@@ -175,26 +183,9 @@ fn run() -> Result<()> {
                             result.text
                         ),
                     );
-                    if dedup.is_new(&result.text) {
-                        let id = next_event_id;
-                        next_event_id += 1;
-                        translation_tx
-                            .send(TranslationJob {
-                                id,
-                                original: result.text.clone(),
-                            })
-                            .context("翻译线程已退出")?;
-                        latest_confirmed = Some(id);
-                        event_started.insert(id, change_started.unwrap_or_else(Instant::now));
-                        logger::write(
-                            "confirmed",
-                            &format!(
-                                "id={id} since_change_ms={}",
-                                change_started.map_or(0, |start| start.elapsed().as_millis())
-                            ),
-                        );
-                        change_started = None;
-                    }
+                    let event_start = change_started.unwrap_or_else(Instant::now);
+                    pending = Some((result, Instant::now() + COMMIT_DELAY, event_start));
+                    logger::write("candidate-pending", "waiting for unchanged text image");
                 }
                 Err(error) => logger::write(
                     "ocr-rejected",
@@ -207,6 +198,29 @@ fn run() -> Result<()> {
             }
         }
 
+        if pending
+            .as_ref()
+            .is_some_and(|(_, commit_at, _)| Instant::now() >= *commit_at)
+            && let Some((result, _, event_start)) = pending.take()
+            && dedup.is_new(&result.text)
+        {
+            let id = next_event_id;
+            next_event_id += 1;
+            translation_tx
+                .send(TranslationJob {
+                    id,
+                    original: result.text,
+                })
+                .context("翻译线程已退出")?;
+            latest_confirmed = Some(id);
+            event_started.insert(id, event_start);
+            logger::write(
+                "confirmed",
+                &format!("id={id} since_change_ms={}", event_start.elapsed().as_millis()),
+            );
+            change_started = None;
+        }
+
         let base_interval = if stability.is_active() {
             ACTIVE_INTERVAL
         } else {
@@ -214,6 +228,9 @@ fn run() -> Result<()> {
         };
         let mut wait = base_interval.saturating_sub(iteration_started.elapsed());
         wait = wait.min(next_window_refresh.saturating_duration_since(Instant::now()));
+        if let Some((_, commit_at, _)) = &pending {
+            wait = wait.min(commit_at.saturating_duration_since(Instant::now()));
+        }
         wait_for_translation(
             &translation_rx,
             wait,

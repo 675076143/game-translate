@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use image::{DynamicImage, GenericImage, ImageFormat, imageops::FilterType};
 
 const MIN_RESULT_CONFIDENCE: f32 = 45.0;
+const MIN_LINE_CONFIDENCE: f32 = 25.0;
 const COLORED_TEXT_THRESHOLD: u8 = 179;
 
 #[derive(Debug, Clone)]
@@ -28,9 +29,9 @@ struct OcrLine {
 
 pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> {
     if detect_panel {
-        let top_height = image.height() * 40 / 100;
-        let bottom_y = image.height() * 55 / 100;
-        let bottom_height = image.height() * 43 / 100;
+        let top_height = image.height() * 30 / 100;
+        let bottom_y = image.height() * 65 / 100;
+        let bottom_height = image.height() * 25 / 100;
         let mut hud = DynamicImage::new_rgba8(image.width(), top_height + bottom_height);
         hud.copy_from(&image.crop_imm(0, 0, image.width(), top_height), 0, 0)
             .expect("HUD top band dimensions must match");
@@ -150,19 +151,70 @@ fn dialogue_score(result: &OcrResult) -> f32 {
     result.confidence + words * 3.0 + complete
 }
 
-fn validate_dialogue(result: OcrResult) -> Result<OcrResult> {
+fn validate_dialogue(mut result: OcrResult) -> Result<OcrResult> {
+    trim_leading_artifacts(&mut result);
     let words: Vec<_> = result.text.split_whitespace().collect();
     let contains_url = words.iter().any(|word| {
         word.starts_with("http://") || word.starts_with("https://") || word.starts_with("www.")
     });
-    if result.line_count > 6 || words.len() > 80 || contains_url {
+    let wordlike = words
+        .iter()
+        .filter(|word| word.chars().filter(|character| character.is_alphabetic()).count() >= 2)
+        .count();
+    let single_character_words = words
+        .iter()
+        .filter(|word| word.chars().filter(|character| character.is_alphanumeric()).count() <= 1)
+        .count();
+    let visible_characters = result
+        .text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count();
+    let symbols = result
+        .text
+        .chars()
+        .filter(|character| !character.is_whitespace() && !character.is_alphanumeric())
+        .count();
+    let incomplete_short_text = !result.text.ends_with(['.', '!', '?']) && wordlike < 4;
+    let repeated_single_characters = single_character_words * 2 > words.len();
+    let symbol_heavy = symbols * 3 > visible_characters;
+    if result.line_count > 6
+        || words.len() > 80
+        || contains_url
+        || wordlike < 2
+        || incomplete_short_text
+        || repeated_single_characters
+        || symbol_heavy
+    {
         bail!(
-            "OCR result rejected as non-dialogue (lines={} words={} url={contains_url})",
+            "OCR result rejected as non-dialogue (lines={} words={} wordlike={wordlike} singles={single_character_words} symbols={symbols} url={contains_url})",
             result.line_count,
             words.len()
         );
     }
     Ok(result)
+}
+
+fn trim_leading_artifacts(result: &mut OcrResult) {
+    let words: Vec<_> = result
+        .text
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if words.is_empty() || matches!(words[0].as_str(), "I" | "A") {
+        return;
+    }
+    let start = words.iter().position(|word| {
+        word.chars().next().is_some_and(char::is_alphabetic)
+            && word.chars().filter(|character| character.is_alphabetic()).count() >= 2
+    });
+    let Some(start) = start.filter(|start| *start > 0) else {
+        return;
+    };
+    result.text = words[start..].join(" ");
+    if result.word_confidences.len() == words.len() {
+        result.word_confidences.drain(..start);
+    }
 }
 
 pub fn recognize(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
@@ -334,7 +386,7 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
             let dialogue_line = line.word_count >= 2 || text.ends_with(['.', '!', '?']);
             (dialogue_line
                 && text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
-                && confidence >= MIN_RESULT_CONFIDENCE)
+                && confidence >= MIN_LINE_CONFIDENCE)
                 .then_some((
                     text,
                     line.confidence_total,
@@ -374,7 +426,7 @@ mod tests {
 
     use image::{DynamicImage, Rgb, RgbImage};
 
-    use super::{focus, otsu_level, parse_tsv, recognize, recognize_window};
+    use super::{OcrResult, focus, otsu_level, parse_tsv, recognize, recognize_window, validate_dialogue};
 
     #[test]
     fn parses_lines_and_drops_isolated_noise() {
@@ -431,12 +483,65 @@ mod tests {
     }
 
     #[test]
+    fn rejects_high_confidence_garbage_from_game_animation() {
+        for text in ["T T T T T T T T", "I'_'II A I", "4% 3", "2 2"] {
+            let words = text.split_whitespace().count();
+            assert!(
+                validate_dialogue(OcrResult {
+                    text: text.into(),
+                    confidence: 90.0,
+                    line_count: 1,
+                    word_confidences: vec![90.0; words],
+                })
+                .is_err(),
+                "accepted {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_short_complete_game_dialogue() {
+        for text in ["Go! Charmander!", "Are you lost?"] {
+            let words = text.split_whitespace().count();
+            assert!(
+                validate_dialogue(OcrResult {
+                    text: text.into(),
+                    confidence: 70.0,
+                    line_count: 1,
+                    word_confidences: vec![70.0; words],
+                })
+                .is_ok(),
+                "rejected {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn removes_leading_panel_artifacts() {
+        for (input, expected) in [
+            ("L 1 I Would you like to rest your Pokémon?", "Would you like to rest your Pokémon?"),
+            ("0K, IT'll take your Pokémon for a few", "IT'll take your Pokémon for a few"),
+            ("_ljl' a Charmander used Ember!", "Charmander used Ember!"),
+        ] {
+            let words = input.split_whitespace().count();
+            let result = validate_dialogue(OcrResult {
+                text: input.into(),
+                confidence: 70.0,
+                line_count: 1,
+                word_confidences: vec![70.0; words],
+            })
+            .unwrap();
+            assert_eq!(result.text, expected);
+        }
+    }
+
+    #[test]
     fn selects_top_and_bottom_hud_bands_regardless_of_color() {
         let image = RgbImage::from_pixel(400, 400, Rgb([30, 30, 30]));
         let image = DynamicImage::ImageRgb8(image);
         let panel = focus(&image, true);
         assert_eq!(panel.width(), 400);
-        assert_eq!(panel.height(), 332);
+        assert_eq!(panel.height(), 220);
     }
 
     #[test]
@@ -487,7 +592,7 @@ mod tests {
         let image = image::open(fixture).unwrap();
         assert_eq!(
             recognize(&image, true).unwrap().text,
-            "We restore your tired Pokemon to Tull health."
+            "We restore your tired Pokémon to Tull health."
         );
     }
 
@@ -501,4 +606,5 @@ mod tests {
             "You put the Potion amay in the ANedicine Pocket."
         );
     }
+
 }
