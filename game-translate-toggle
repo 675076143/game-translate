@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if hyprctl clients -j | jq -e '.[] | select(.title == "GT-Translate")' >/dev/null; then
+    hyprctl dispatch closewindow 'title:^(GT-Translate)$'
+    exit 0
+fi
+
+setsid -f kitty --title GT-Translate \
+    -o font_size=15 \
+    -o background=#1e1e2e \
+    -o foreground=#cdd6f4 \
+    -o window_padding_width=10 \
+    -e /home/robin/.local/bin/game-translate
+sleep 0.8
+hyprctl dispatch movewindow l,'title:^(GT-Translate)$'
