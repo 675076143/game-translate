@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use image::{DynamicImage, GenericImage, ImageFormat, imageops::FilterType};
 
 const MIN_RESULT_CONFIDENCE: f32 = 45.0;
+const COLORED_TEXT_THRESHOLD: u8 = 179;
 
 #[derive(Debug, Clone)]
 pub struct OcrResult {
@@ -45,14 +46,16 @@ pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> 
 }
 
 pub fn recognize_window(image: &DynamicImage) -> Result<OcrResult> {
-    let top_height = image.height() * 40 / 100;
-    let bottom_y = image.height() * 55 / 100;
-    let bottom_height = image.height() * 43 / 100;
-    let top = recognize(&image.crop_imm(0, 0, image.width(), top_height), true);
-    let bottom = recognize(
-        &image.crop_imm(0, bottom_y, image.width(), bottom_height),
-        true,
-    );
+    let top_height = image.height() * 30 / 100;
+    let bottom_y = image.height() * 65 / 100;
+    let bottom_height = image.height() * 25 / 100;
+    let top = recognize_panel(&image.crop_imm(0, 0, image.width(), top_height));
+    let bottom = recognize_panel(&image.crop_imm(
+        0,
+        bottom_y,
+        image.width(),
+        bottom_height,
+    ));
     match (top, bottom) {
         (Ok(top), Ok(bottom)) => Ok(if dialogue_score(&top) >= dialogue_score(&bottom) {
             top
@@ -62,6 +65,83 @@ pub fn recognize_window(image: &DynamicImage) -> Result<OcrResult> {
         (Ok(result), Err(_)) | (Err(_), Ok(result)) => Ok(result),
         (Err(top), Err(bottom)) => bail!("top HUD: {top:#}; bottom HUD: {bottom:#}"),
     }
+}
+
+fn recognize_panel(image: &DynamicImage) -> Result<OcrResult> {
+    let source = image.to_rgb8();
+    let mut strongest_channel = image::GrayImage::new(source.width(), source.height());
+    for (x, y, pixel) in source.enumerate_pixels() {
+        let brightest_channel = pixel.0.into_iter().max().unwrap_or_default();
+        strongest_channel.put_pixel(x, y, image::Luma([brightest_channel]));
+    }
+    let primary = recognize_binary(strongest_channel);
+    if primary.as_ref().is_ok_and(is_complete_candidate) {
+        return primary;
+    }
+
+    let secondary = recognize_binary(image.grayscale().to_luma8());
+    match (primary, secondary) {
+        (Ok(primary), Ok(secondary)) => Ok(if dialogue_score(&primary) >= dialogue_score(&secondary)
+        {
+            primary
+        } else {
+            secondary
+        }),
+        (Ok(result), Err(_)) | (Err(_), Ok(result)) => Ok(result),
+        (Err(primary), Err(secondary)) => {
+            bail!("color candidate: {primary:#}; brightness candidate: {secondary:#}")
+        }
+    }
+}
+
+fn recognize_binary(mut image: image::GrayImage) -> Result<OcrResult> {
+    let threshold = otsu_level(&image).min(COLORED_TEXT_THRESHOLD);
+    for pixel in image.pixels_mut() {
+        pixel[0] = if pixel[0] > threshold { 255 } else { 0 };
+    }
+    let image = DynamicImage::ImageLuma8(image);
+    recognize_prepared(&image, true)
+}
+
+fn is_complete_candidate(result: &OcrResult) -> bool {
+    result.confidence >= 55.0
+        && result.text.split_whitespace().count() >= 3
+        && result.text.ends_with(['.', '!', '?'])
+}
+
+fn otsu_level(image: &image::GrayImage) -> u8 {
+    let mut histogram = [0_u64; 256];
+    for pixel in image.pixels() {
+        histogram[usize::from(pixel[0])] += 1;
+    }
+    let total = u64::from(image.width()) * u64::from(image.height());
+    let weighted_total: u64 = histogram
+        .iter()
+        .enumerate()
+        .map(|(level, count)| level as u64 * count)
+        .sum();
+    let mut background_count = 0_u64;
+    let mut background_weight = 0_u64;
+    let mut best_level = 0_u8;
+    let mut best_variance = 0.0_f64;
+    for (level, count) in histogram.iter().copied().enumerate() {
+        background_count += count;
+        if background_count == 0 || background_count == total {
+            continue;
+        }
+        background_weight += level as u64 * count;
+        let foreground_count = total - background_count;
+        let background_mean = background_weight as f64 / background_count as f64;
+        let foreground_mean = (weighted_total - background_weight) as f64 / foreground_count as f64;
+        let variance = background_count as f64
+            * foreground_count as f64
+            * (background_mean - foreground_mean).powi(2);
+        if variance > best_variance {
+            best_variance = variance;
+            best_level = level as u8;
+        }
+    }
+    best_level
 }
 
 fn dialogue_score(result: &OcrResult) -> f32 {
@@ -294,7 +374,7 @@ mod tests {
 
     use image::{DynamicImage, Rgb, RgbImage};
 
-    use super::{focus, parse_tsv, recognize};
+    use super::{focus, otsu_level, parse_tsv, recognize, recognize_window};
 
     #[test]
     fn parses_lines_and_drops_isolated_noise() {
@@ -314,6 +394,18 @@ mod tests {
         let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
 5\t1\t1\t1\t1\t1\t0\t0\t1\t1\t90\tFout\n";
         assert!(parse_tsv(tsv).is_err());
+    }
+
+    #[test]
+    fn otsu_separates_text_from_dark_panel() {
+        let mut image = image::GrayImage::from_pixel(100, 20, image::Luma([40]));
+        for x in 20..80 {
+            for y in 5..15 {
+                image.put_pixel(x, y, image::Luma([220]));
+            }
+        }
+        let threshold = otsu_level(&image);
+        assert!((40..220).contains(&threshold));
     }
 
     #[test]
@@ -396,6 +488,17 @@ mod tests {
         assert_eq!(
             recognize(&image, true).unwrap().text,
             "We restore your tired Pokemon to Tull health."
+        );
+    }
+
+    #[test]
+    fn recognizes_selected_text_in_bottom_dialogue_panel() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/medicine-pocket.png");
+        let image = image::open(fixture).unwrap();
+        assert_eq!(
+            recognize_window(&image).unwrap().text,
+            "You put the Potion amay in the ANedicine Pocket."
         );
     }
 }
