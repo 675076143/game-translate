@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io::Write,
     process::{Command, Stdio},
 };
@@ -19,6 +20,13 @@ struct OcrLine {
     words: Vec<String>,
     confidence_total: f32,
     word_count: usize,
+}
+
+pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> {
+    if detect_panel && let Some(panel) = dialogue_panel(image) {
+        return Cow::Owned(panel);
+    }
+    Cow::Borrowed(image)
 }
 
 pub fn recognize(image: &DynamicImage) -> Result<OcrResult> {
@@ -46,6 +54,51 @@ pub fn recognize(image: &DynamicImage) -> Result<OcrResult> {
     }
     let raw = String::from_utf8(output.stdout).context("Tesseract 输出不是 UTF-8")?;
     parse_tsv(&raw)
+}
+
+fn dialogue_panel(image: &DynamicImage) -> Option<DynamicImage> {
+    let rgb = image.to_rgb8();
+    let width = rgb.width() as usize;
+    let height = rgb.height() as usize;
+    if width < 100 || height < 100 {
+        return None;
+    }
+
+    let mut best = (0_usize, 0_usize);
+    let mut start = None;
+    let mut last_bright = None;
+    let allowed_gap = (height / 20).max(4);
+    for (y, row) in rgb.as_raw().chunks_exact(width * 3).enumerate() {
+        let bright = row
+            .chunks_exact(3)
+            .filter(|pixel| pixel[0] >= 235 && pixel[1] >= 235 && pixel[2] >= 235)
+            .count();
+        if bright * 100 >= width * 60 {
+            start.get_or_insert(y);
+            last_bright = Some(y);
+        } else if let (Some(run_start), Some(last)) = (start, last_bright)
+            && y - last > allowed_gap
+        {
+            if last + 1 - run_start > best.1 - best.0 {
+                best = (run_start, last + 1);
+            }
+            start = None;
+            last_bright = None;
+        }
+    }
+    if let (Some(run_start), Some(last)) = (start, last_bright)
+        && last + 1 - run_start > best.1 - best.0
+    {
+        best = (run_start, last + 1);
+    }
+    if best.1 - best.0 < height / 10 {
+        return None;
+    }
+
+    let padding = (height / 40).max(8);
+    let top = best.0.saturating_sub(padding);
+    let bottom = (best.1 + padding).min(height);
+    Some(DynamicImage::ImageRgb8(rgb).crop_imm(0, top as u32, width as u32, (bottom - top) as u32))
 }
 
 fn parse_tsv(raw: &str) -> Result<OcrResult> {
@@ -106,7 +159,9 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
 mod tests {
     use std::path::Path;
 
-    use super::{parse_tsv, recognize};
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    use super::{dialogue_panel, parse_tsv, recognize};
 
     #[test]
     fn parses_lines_and_drops_isolated_noise() {
@@ -124,6 +179,23 @@ mod tests {
         let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
 5\t1\t1\t1\t1\t1\t0\t0\t1\t1\t90\tFout\n";
         assert!(parse_tsv(tsv).is_err());
+    }
+
+    #[test]
+    fn isolates_a_bright_dialogue_panel() {
+        let mut image = RgbImage::from_pixel(400, 400, Rgb([30, 120, 60]));
+        for y in 240..360 {
+            for x in 0..400 {
+                image.put_pixel(x, y, Rgb([250, 250, 250]));
+            }
+        }
+        for x in 0..400 {
+            image.put_pixel(x, 300, Rgb([80, 80, 80]));
+        }
+        let panel = dialogue_panel(&DynamicImage::ImageRgb8(image)).unwrap();
+        assert_eq!(panel.width(), 400);
+        assert!(panel.height() < 180);
+        assert!(panel.height() >= 120);
     }
 
     #[test]

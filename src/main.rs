@@ -44,14 +44,14 @@ fn run() -> Result<()> {
     let log_path = logger::init()?;
     print_status("等待平铺布局稳定…");
     thread::sleep(LAYOUT_SETTLE);
-    let tracker = match env::args().nth(1).as_deref() {
+    let (tracker, detect_panel) = match env::args().nth(1).as_deref() {
         None | Some("--region") => {
             let selection = select_region()?;
-            window::WindowTracker::bind(selection)?
+            (window::WindowTracker::bind(selection)?, false)
         }
         Some("--window") => {
             print_status("请点击要跟踪的游戏窗口");
-            window::WindowTracker::select()?
+            (window::WindowTracker::select()?, true)
         }
         Some(_) => bail!("usage: game-translate [--region|--window]"),
     };
@@ -140,7 +140,8 @@ fn run() -> Result<()> {
         let capture_started = Instant::now();
         let frame = capture.frame().context("Wayland 截图失败")?;
         let capture_elapsed = capture_started.elapsed();
-        let event = stability.update(&frame);
+        let focused = ocr::focus(&frame, detect_panel);
+        let event = stability.update(&focused);
 
         if event == FrameEvent::Changed {
             change_started = Some(Instant::now());
@@ -149,7 +150,7 @@ fn run() -> Result<()> {
             speculative = None;
         } else if event == FrameEvent::Stable {
             let ocr_started = Instant::now();
-            match ocr::recognize(&frame) {
+            match ocr::recognize(&focused) {
                 Ok(result) => {
                     logger::write(
                         "ocr-candidate",
@@ -188,7 +189,7 @@ fn run() -> Result<()> {
             }
         } else if confirmer.is_due(Instant::now()) {
             confirm_candidate(
-                &frame,
+                &focused,
                 &mut confirmer,
                 &mut dedup,
                 &translation_tx,

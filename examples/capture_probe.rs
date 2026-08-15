@@ -28,8 +28,13 @@ fn main() -> Result<()> {
     let connection = WayshotConnection::new()?;
     let started = Instant::now();
     let mut pixels = 0_u64;
-    for _ in 0..50 {
+    for index in 0..50 {
         let image = connection.screenshot(region, false)?;
+        if index == 0
+            && let Some(path) = env::args().nth(2)
+        {
+            image.save(path)?;
+        }
         pixels += u64::from(image.width()) * u64::from(image.height());
     }
     let elapsed = started.elapsed();

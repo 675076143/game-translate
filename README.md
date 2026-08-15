@@ -52,6 +52,8 @@ game-translate-toggle --window
 
 Click the game window once. Capture pauses whenever that window is not on an active workspace, so another program can never replace it at the same screen coordinates.
 
+In window mode, the same detected dialogue panel drives both change detection and OCR. Animated sprites and scenery therefore do not dilute text changes or pollute recognition.
+
 ## Test
 
 ```sh
