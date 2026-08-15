@@ -6,12 +6,12 @@ The first supported setup is Pokémon Infinite Fusion running under Proton on Hy
 
 ## How it works
 
-1. `slurp` selects the dialogue text region.
-2. `libwayshot` captures that region through the wlroots screencopy protocol without temporary screenshot files.
-3. A sampled-pixel state machine waits for three stable frames.
-4. Tesseract reads the stable image from standard input.
-5. Normalized Levenshtein similarity suppresses OCR jitter and repeated dialogue.
-6. A worker thread sends new English text to Google Translate and prints the result in a Kitty terminal.
+1. `slurp` selects either a dialogue region or an entire program window.
+2. Hyprland IPC binds that selection to its source window, so tiled-window movement cannot redirect capture to another application.
+3. `libwayshot` captures the translated region through the wlroots screencopy protocol without temporary screenshot files.
+4. A sampled-pixel state machine waits for three stable frames, then a second OCR pass confirms that typewriter text is complete.
+5. Tesseract TSV confidence rejects low-quality noise; normalized Levenshtein similarity suppresses OCR jitter and repeated dialogue.
+6. Known battle templates use canonical Pokémon terminology; other dialogue is sent to Google Translate on a worker thread.
 
 ## Requirements
 
@@ -36,7 +36,21 @@ install -Dm755 target/release/game-translate ~/.local/bin/game-translate
 install -Dm755 game-translate-toggle ~/.local/bin/game-translate-toggle
 ```
 
-Run `game-translate-toggle`, then select only the dialogue text area. Avoid including the dialogue-box border.
+Region mode follows a text rectangle relative to the selected game window:
+
+```sh
+game-translate-toggle
+```
+
+Select only the dialogue text area and avoid the dialogue-box border.
+
+Window mode follows one program window in its entirety, even when it moves, resizes, or changes workspace:
+
+```sh
+game-translate-toggle --window
+```
+
+Click the game window once. Capture pauses whenever that window is not on an active workspace, so another program can never replace it at the same screen coordinates.
 
 ## Test
 
@@ -46,6 +60,8 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 The OCR regression tests invoke the system `tesseract` executable.
+
+Runtime diagnostics are written to `~/.local/state/game-translate/game-translate.log`. The file is truncated on startup after it exceeds 1 MiB; screenshots are never logged.
 
 ## Scope
 

@@ -45,18 +45,7 @@ pub struct Capture {
 impl Capture {
     pub fn new(geometry: Geometry) -> Result<Self> {
         let connection = WayshotConnection::new().context("无法连接 Wayland screencopy 协议")?;
-        let region = LogicalRegion {
-            inner: Region {
-                position: Position {
-                    x: geometry.x,
-                    y: geometry.y,
-                },
-                size: Size {
-                    width: geometry.width,
-                    height: geometry.height,
-                },
-            },
-        };
+        let region = logical_region(geometry);
         Ok(Self { connection, region })
     }
 
@@ -64,6 +53,25 @@ impl Capture {
         self.connection
             .screenshot(self.region, false)
             .context("screencopy 捕获失败")
+    }
+
+    pub fn set_geometry(&mut self, geometry: Geometry) {
+        self.region = logical_region(geometry);
+    }
+}
+
+fn logical_region(geometry: Geometry) -> LogicalRegion {
+    LogicalRegion {
+        inner: Region {
+            position: Position {
+                x: geometry.x,
+                y: geometry.y,
+            },
+            size: Size {
+                width: geometry.width,
+                height: geometry.height,
+            },
+        },
     }
 }
 

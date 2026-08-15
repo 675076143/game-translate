@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if hyprctl clients -j | jq -e '.[] | select(.title == "GT-Translate")' >/dev/null; then
-    hyprctl dispatch closewindow 'title:^(GT-Translate)$'
+clients="$(hyprctl clients -j 2>/dev/null)"
+if ! jq -e 'type == "array"' <<<"$clients" >/dev/null 2>&1; then
+    echo "无法读取 Hyprland 窗口列表" >&2
+    exit 1
+fi
+
+if jq -e '.[] | select(.title == "GT-Translate")' <<<"$clients" >/dev/null; then
+    hyprctl dispatch 'hl.dsp.window.close({ window = "title:GT-Translate" })'
     exit 0
 fi
 
@@ -11,6 +17,6 @@ setsid -f kitty --title GT-Translate \
     -o background=#1e1e2e \
     -o foreground=#cdd6f4 \
     -o window_padding_width=10 \
-    -e /home/robin/.local/bin/game-translate
+    -e /home/robin/.local/bin/game-translate "$@"
 sleep 0.8
-hyprctl dispatch movewindow l,'title:^(GT-Translate)$'
+hyprctl dispatch 'hl.dsp.window.move({ direction = "l", window = "title:GT-Translate" })'

@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
 use serde_json::Value;
 
+use crate::terminology;
+
 const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
 
 pub struct Translation {
@@ -26,6 +28,9 @@ impl Translator {
     }
 
     pub fn translate(&self, original: &str) -> Result<String> {
+        if let Some(translated) = terminology::translate_battle(original) {
+            return Ok(translated);
+        }
         let payload: Value = self
             .client
             .get(ENDPOINT)
