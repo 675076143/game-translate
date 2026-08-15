@@ -283,6 +283,10 @@ fn confirm_candidate(
                 if let Some(outcome) = buffered.remove(&id) {
                     render_outcome(outcome, event_started);
                 }
+            } else if let Some((_, id)) = speculative.as_ref() {
+                buffered.remove(id);
+                event_started.remove(id);
+                logger::write("duplicate", &format!("id={id}"));
             }
             *speculative = None;
         }
