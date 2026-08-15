@@ -152,7 +152,7 @@ def normalize_text(text):
 def main():
     engine = RapidOCR(
         params={
-            "Global.log_level": "warning",
+            "Global.log_level": "critical",
             "Global.use_cls": False,
             "Global.min_height": 12,
         }
