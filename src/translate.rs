@@ -8,11 +8,12 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::Client;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{logger, terminology};
 
-const ENDPOINT: &str = "https://translate.googleapis.com/translate_a/single";
+const ENDPOINT: &str = "http://127.0.0.1:11434/api/generate";
+const MODEL: &str = "qwen3:4b-instruct";
 const CACHE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +21,7 @@ pub enum TranslationSource {
     Template,
     MemoryCache,
     FileCache,
-    Network,
+    Model,
 }
 
 impl TranslationSource {
@@ -29,7 +30,7 @@ impl TranslationSource {
             Self::Template => "template",
             Self::MemoryCache => "memory-cache",
             Self::FileCache => "file-cache",
-            Self::Network => "network",
+            Self::Model => "model",
         }
     }
 }
@@ -83,7 +84,7 @@ impl Translator {
 
     pub fn warm_up(&self) {
         let started = Instant::now();
-        let result = self.translate_network(".");
+        let result = self.generate("");
         logger::write(
             "translate-warmup",
             &format!(
@@ -105,9 +106,9 @@ impl Translator {
                 self.insert_memory(job.original.clone(), translated.clone());
                 (translated, TranslationSource::FileCache)
             } else {
-                let translated = self.translate_network(&job.original)?;
+                let translated = self.translate_model(&job.original)?;
                 self.insert_file_cache(job.original.clone(), translated.clone())?;
-                (translated, TranslationSource::Network)
+                (translated, TranslationSource::Model)
             };
         Ok(Translation {
             id: job.id,
@@ -118,35 +119,47 @@ impl Translator {
         })
     }
 
-    fn translate_network(&self, original: &str) -> Result<String> {
-        let payload: Value = self
-            .client
-            .get(ENDPOINT)
-            .query(&[
-                ("client", "gtx"),
-                ("sl", "en"),
-                ("tl", "zh-CN"),
-                ("dt", "t"),
-                ("q", original),
-            ])
-            .send()
-            .context("翻译请求失败")?
-            .error_for_status()
-            .context("翻译服务返回错误状态")?
-            .json()
-            .context("无法解析翻译响应")?;
-        let segments = payload
-            .get(0)
-            .and_then(Value::as_array)
-            .context("翻译响应缺少文本")?;
-        let translated = segments
-            .iter()
-            .filter_map(|segment| segment.get(0).and_then(Value::as_str))
-            .collect::<String>();
+    fn translate_model(&self, original: &str) -> Result<String> {
+        let prompt = format!(
+            "英译简中，只输出译文，使用宝可梦官方术语，纠正明显OCR错字。\
+术语：Pokémon=宝可梦，Pecha Berry=桃桃果，Berries Pocket=树果口袋，\
+Pokémon Center=宝可梦中心，Poké Mart=友好商店。\n{original}"
+        );
+        let translated = self.generate(&prompt)?;
         if translated.trim().is_empty() {
-            bail!("翻译服务返回空文本");
+            bail!("本地翻译模型返回空文本");
         }
-        Ok(translated)
+        Ok(translated.trim().to_owned())
+    }
+
+    fn generate(&self, prompt: &str) -> Result<String> {
+        let response = self
+            .client
+            .post(ENDPOINT)
+            .json(&json!({
+                "model": MODEL,
+                "prompt": prompt,
+                "stream": false,
+                "think": false,
+                "keep_alive": "30m",
+                "options": {
+                    "temperature": 0,
+                    "num_predict": 100
+                }
+            }))
+            .send()
+            .context("无法连接本地 Ollama 翻译服务")?;
+        let status = response.status();
+        let body = response.text().context("无法读取 Ollama 响应")?;
+        if !status.is_success() {
+            bail!("Ollama 返回 HTTP {status}: {}", body.trim());
+        }
+        let payload: Value = serde_json::from_str(&body).context("无法解析 Ollama 响应")?;
+        payload
+            .get("response")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .context("Ollama 响应缺少译文")
     }
 
     fn insert_memory(&mut self, original: String, translated: String) {

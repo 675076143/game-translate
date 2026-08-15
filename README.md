@@ -11,7 +11,7 @@ The first supported setup is Pokémon Infinite Fusion running under Proton on Hy
 3. `libwayshot` captures the translated region through the wlroots screencopy protocol without temporary screenshot files.
 4. A sampled-pixel state machine waits for three stable frames, then a second OCR pass confirms that typewriter text is complete.
 5. Tesseract TSV confidence rejects low-quality noise; normalized Levenshtein similarity suppresses OCR jitter and repeated dialogue.
-6. Known battle templates use canonical Pokémon terminology; other dialogue is sent to Google Translate on a worker thread.
+6. Known battle templates use canonical Pokémon terminology; other dialogue is translated locally by Qwen through Ollama on a worker thread.
 
 ## Requirements
 
@@ -19,13 +19,14 @@ The first supported setup is Pokémon Infinite Fusion running under Proton on Hy
 - Rust 1.85 or newer
 - `slurp`
 - `tesseract` with English language data
+- Ollama running locally with `qwen3:4b-instruct`
 - `kitty`, `jq`, and `hyprctl` for the included toggle script
-- Internet access for translation
 
 On Arch Linux:
 
 ```sh
 sudo pacman -S --needed rust slurp tesseract tesseract-data-eng kitty jq
+ollama pull qwen3:4b-instruct
 ```
 
 ## Build and install
@@ -65,7 +66,7 @@ The OCR regression tests invoke the system `tesseract` executable.
 
 Runtime diagnostics are written to `~/.local/state/game-translate/game-translate.log`. The file is truncated on startup after it exceeds 1 MiB; screenshots are never logged.
 
-Translations use a 256-entry memory cache backed by an append-only SSD cache at `~/.local/state/game-translate/translations.jsonl`. Repeated dialogue is served without a network request, including across restarts.
+Translations use a 256-entry memory cache backed by an append-only SSD cache at `~/.local/state/game-translate/translations.jsonl`. Repeated dialogue is served without model inference, including across restarts.
 
 Summarize measured translation latency with:
 
