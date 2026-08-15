@@ -23,20 +23,31 @@ struct OcrLine {
 }
 
 pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> {
-    if detect_panel && let Some(panel) = dialogue_panel(image) {
-        return Cow::Owned(panel);
+    if detect_panel {
+        let top = image.height() * 55 / 100;
+        let bottom = image.height() * 98 / 100;
+        return Cow::Owned(image.crop_imm(0, top, image.width(), bottom - top));
     }
     Cow::Borrowed(image)
 }
 
-pub fn recognize(image: &DynamicImage) -> Result<OcrResult> {
+pub fn recognize(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
     let mut png = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut png, ImageFormat::Png)
         .context("无法编码 OCR 输入")?;
 
+    let page_segmentation = if block_text { "6" } else { "11" };
     let mut child = Command::new("tesseract")
-        .args(["stdin", "stdout", "-l", "eng", "--psm", "11", "tsv"])
+        .args([
+            "stdin",
+            "stdout",
+            "-l",
+            "eng",
+            "--psm",
+            page_segmentation,
+            "tsv",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -56,49 +67,15 @@ pub fn recognize(image: &DynamicImage) -> Result<OcrResult> {
     parse_tsv(&raw)
 }
 
-fn dialogue_panel(image: &DynamicImage) -> Option<DynamicImage> {
-    let rgb = image.to_rgb8();
-    let width = rgb.width() as usize;
-    let height = rgb.height() as usize;
-    if width < 100 || height < 100 {
-        return None;
-    }
-
-    let mut best = (0_usize, 0_usize);
-    let mut start = None;
-    let mut last_bright = None;
-    let allowed_gap = (height / 20).max(4);
-    for (y, row) in rgb.as_raw().chunks_exact(width * 3).enumerate() {
-        let bright = row
-            .chunks_exact(3)
-            .filter(|pixel| pixel[0] >= 235 && pixel[1] >= 235 && pixel[2] >= 235)
-            .count();
-        if bright * 100 >= width * 60 {
-            start.get_or_insert(y);
-            last_bright = Some(y);
-        } else if let (Some(run_start), Some(last)) = (start, last_bright)
-            && y - last > allowed_gap
-        {
-            if last + 1 - run_start > best.1 - best.0 {
-                best = (run_start, last + 1);
-            }
-            start = None;
-            last_bright = None;
-        }
-    }
-    if let (Some(run_start), Some(last)) = (start, last_bright)
-        && last + 1 - run_start > best.1 - best.0
+fn clean_word(word: &str) -> Option<String> {
+    let word = if let Some((_, suffix)) = word.rsplit_once('*')
+        && suffix.chars().filter(|c| c.is_alphabetic()).count() >= 2
     {
-        best = (run_start, last + 1);
-    }
-    if best.1 - best.0 < height / 10 {
-        return None;
-    }
-
-    let padding = (height / 20).max(8);
-    let top = best.0.saturating_sub(padding);
-    let bottom = (best.1 + padding).min(height);
-    Some(DynamicImage::ImageRgb8(rgb).crop_imm(0, top as u32, width as u32, (bottom - top) as u32))
+        suffix
+    } else {
+        word
+    };
+    (word.chars().any(char::is_alphanumeric) && word != "|").then(|| word.to_owned())
 }
 
 fn parse_tsv(raw: &str) -> Result<OcrResult> {
@@ -114,7 +91,9 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
             columns[4].parse().context("OCR line number invalid")?,
         );
         let confidence: f32 = columns[10].parse().context("OCR confidence invalid")?;
-        let text = columns[11].trim().to_owned();
+        let Some(text) = clean_word(columns[11].trim()) else {
+            continue;
+        };
         if let Some(line) = lines.last_mut().filter(|line| line.key == key) {
             line.words.push(text);
             line.confidence_total += confidence;
@@ -160,7 +139,7 @@ mod tests {
 
     use image::{DynamicImage, Rgb, RgbImage};
 
-    use super::{dialogue_panel, parse_tsv, recognize};
+    use super::{focus, parse_tsv, recognize};
 
     #[test]
     fn parses_lines_and_drops_isolated_noise() {
@@ -183,20 +162,32 @@ mod tests {
     }
 
     #[test]
-    fn isolates_a_bright_dialogue_panel() {
-        let mut image = RgbImage::from_pixel(400, 400, Rgb([30, 120, 60]));
-        for y in 240..360 {
-            for x in 0..400 {
-                image.put_pixel(x, y, Rgb([250, 250, 250]));
-            }
-        }
-        for x in 0..400 {
-            image.put_pixel(x, 300, Rgb([80, 80, 80]));
-        }
-        let panel = dialogue_panel(&DynamicImage::ImageRgb8(image)).unwrap();
+    fn selects_the_bottom_dialogue_band_regardless_of_color() {
+        let image = RgbImage::from_pixel(400, 400, Rgb([30, 30, 30]));
+        let image = DynamicImage::ImageRgb8(image);
+        let panel = focus(&image, true);
         assert_eq!(panel.width(), 400);
-        assert!(panel.height() < 180);
-        assert!(panel.height() >= 120);
+        assert_eq!(panel.height(), 172);
+    }
+
+    #[test]
+    fn removes_panel_borders_and_icon_artifacts() {
+        let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+5\t1\t1\t1\t1\t1\t0\t0\t1\t1\t79\t|\n\
+5\t1\t1\t1\t1\t2\t0\t0\t1\t1\t80\tYou\n\
+5\t1\t1\t1\t1\t3\t0\t0\t1\t1\t80\tput\n\
+5\t1\t1\t1\t1\t4\t0\t0\t1\t1\t80\tthe\n\
+5\t1\t1\t1\t1\t5\t0\t0\t1\t1\t86\tPecha\n\
+5\t1\t1\t1\t1\t6\t0\t0\t1\t1\t79\tBerry\n\
+5\t1\t1\t1\t1\t7\t0\t0\t1\t1\t75\taway\n\
+5\t1\t1\t1\t2\t1\t0\t0\t1\t1\t89\tin\n\
+5\t1\t1\t1\t2\t2\t0\t0\t1\t1\t89\tthe\n\
+5\t1\t1\t1\t2\t3\t0\t0\t1\t1\t0\ts*Berries\n\
+5\t1\t1\t1\t2\t4\t0\t0\t1\t1\t80\tPocket.\n";
+        assert_eq!(
+            parse_tsv(tsv).unwrap().text,
+            "You put the Pecha Berry away in the Berries Pocket."
+        );
     }
 
     #[test]
@@ -205,7 +196,7 @@ mod tests {
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pokemon-center.png");
         let image = image::open(fixture).unwrap();
         assert_eq!(
-            recognize(&image).unwrap().text,
+            recognize(&image, false).unwrap().text,
             "We restore your tired Pokémon to full health."
         );
     }
