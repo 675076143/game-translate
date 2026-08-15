@@ -6,6 +6,9 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, GenericImage, ImageFormat, imageops::FilterType};
+use strsim::normalized_levenshtein;
+
+use crate::logger;
 
 const MIN_RESULT_CONFIDENCE: f32 = 45.0;
 const MIN_LINE_CONFIDENCE: f32 = 25.0;
@@ -33,6 +36,9 @@ struct OcrLine {
 
 pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> {
     if detect_panel {
+        if is_move_menu(image) {
+            return Cow::Borrowed(image);
+        }
         let top_height = image.height() * TOP_HEIGHT_PERCENT / 100;
         let bottom_y = image.height() * BOTTOM_Y_PERCENT / 100;
         let bottom_height = image.height() * EXTENDED_BOTTOM_HEIGHT_PERCENT / 100;
@@ -51,6 +57,11 @@ pub fn focus(image: &DynamicImage, detect_panel: bool) -> Cow<'_, DynamicImage> 
 }
 
 pub fn recognize_window(image: &DynamicImage) -> Result<OcrResult> {
+    if is_move_menu(image) {
+        logger::write("scene", "move-menu");
+        return recognize_move_menu(image);
+    }
+    logger::write("scene", "dialogue");
     let top_height = image.height() * TOP_HEIGHT_PERCENT / 100;
     let bottom_y = image.height() * BOTTOM_Y_PERCENT / 100;
     let bottom_height = image.height() * BOTTOM_HEIGHT_PERCENT / 100;
@@ -94,6 +105,97 @@ pub fn recognize_window(image: &DynamicImage) -> Result<OcrResult> {
         (Ok(result), Err(_)) | (Err(_), Ok(result)) => Ok(result),
         (Err(top), Err(bottom)) => bail!("top HUD: {top:#}; bottom HUD: {bottom:#}"),
     }
+}
+
+fn is_move_menu(image: &DynamicImage) -> bool {
+    let source = image.to_rgb8();
+    let mut red = 0_usize;
+    let mut sampled = 0_usize;
+    for y in (0..source.height()).step_by(16) {
+        for x in (source.width() / 2..source.width()).step_by(16) {
+            let pixel = source.get_pixel(x, y).0;
+            sampled += 1;
+            if pixel[0] > 180 && pixel[0] > pixel[1].saturating_add(35) {
+                red += 1;
+            }
+        }
+    }
+    red * 8 > sampled
+}
+
+fn recognize_move_menu(image: &DynamicImage) -> Result<OcrResult> {
+    let description = image.crop_imm(
+        0,
+        image.height() * 55 / 100,
+        image.width() * 48 / 100,
+        image.height() * 43 / 100,
+    );
+    let moves = image.crop_imm(
+        image.width() * 50 / 100,
+        image.height() * 4 / 100,
+        image.width() * 48 / 100,
+        image.height() * 92 / 100,
+    );
+    let description = auto_level(description.grayscale());
+    let moves = auto_level(moves.grayscale());
+    let description = recognize_prepared_psm(&description, "6", false)
+        .context("move description OCR failed")?;
+    let mut moves = recognize_prepared_psm(&moves, "4", false).context("move list OCR failed")?;
+    moves.text = normalize_move_menu_text(&moves.text);
+    let total_words = description.word_confidences.len() + moves.word_confidences.len();
+    let confidence = (description.confidence * description.word_confidences.len() as f32
+        + moves.confidence * moves.word_confidences.len() as f32)
+        / total_words.max(1) as f32;
+    let mut word_confidences = moves.word_confidences;
+    word_confidences.extend(description.word_confidences);
+    Ok(OcrResult {
+        text: format!(
+            "Move menu: {} Description: {}",
+            moves.text, description.text
+        ),
+        confidence,
+        line_count: moves.line_count + description.line_count,
+        word_confidences,
+    })
+}
+
+fn auto_level(image: DynamicImage) -> DynamicImage {
+    let mut image = image.to_luma8();
+    let min = image.pixels().map(|pixel| pixel[0]).min().unwrap_or(0);
+    let max = image.pixels().map(|pixel| pixel[0]).max().unwrap_or(255);
+    if min < max {
+        for pixel in image.pixels_mut() {
+            pixel[0] = ((u16::from(pixel[0] - min) * 255) / u16::from(max - min)) as u8;
+        }
+    }
+    DynamicImage::ImageLuma8(image)
+}
+
+fn normalize_move_menu_text(text: &str) -> String {
+    const MOVES: [&str; 4] = ["Scratch", "Growl", "Ember", "Smokescreen"];
+    text.split_whitespace()
+        .map(|word| {
+            let letters: String = word.chars().filter(|character| character.is_alphabetic()).collect();
+            if let Some(name) = MOVES.iter().find(|name| {
+                normalized_levenshtein(&letters.to_lowercase(), &name.to_lowercase()) >= 0.70
+            }) {
+                return (*name).to_owned();
+            }
+            if word.contains('/') {
+                return word
+                    .chars()
+                    .map(|character| match character {
+                        'O' | 'o' => '0',
+                        'K' | 'k' => '5',
+                        ',' => '/',
+                        other => other,
+                    })
+                    .collect();
+            }
+            word.to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn recognize_panel(image: &DynamicImage) -> Result<OcrResult> {
@@ -328,12 +430,28 @@ fn starts_uppercase(text: &str) -> bool {
 }
 
 fn recognize_prepared(image: &DynamicImage, block_text: bool) -> Result<OcrResult> {
+    recognize_prepared_mode(image, block_text, true)
+}
+
+fn recognize_prepared_mode(
+    image: &DynamicImage,
+    block_text: bool,
+    dialogue: bool,
+) -> Result<OcrResult> {
+    let page_segmentation = if block_text { "6" } else { "11" };
+    recognize_prepared_psm(image, page_segmentation, dialogue)
+}
+
+fn recognize_prepared_psm(
+    image: &DynamicImage,
+    page_segmentation: &str,
+    dialogue: bool,
+) -> Result<OcrResult> {
     let mut png = std::io::Cursor::new(Vec::new());
     image
         .write_to(&mut png, ImageFormat::Png)
         .context("无法编码 OCR 输入")?;
 
-    let page_segmentation = if block_text { "6" } else { "11" };
     let mut child = Command::new("tesseract")
         .args([
             "stdin",
@@ -360,7 +478,7 @@ fn recognize_prepared(image: &DynamicImage, block_text: bool) -> Result<OcrResul
         bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }
     let raw = String::from_utf8(output.stdout).context("Tesseract 输出不是 UTF-8")?;
-    parse_tsv(&raw)
+    parse_tsv_mode(&raw, dialogue)
 }
 
 fn clean_word(word: &str) -> Option<String> {
@@ -374,7 +492,13 @@ fn clean_word(word: &str) -> Option<String> {
     (word.chars().any(char::is_alphanumeric) && word != "|").then(|| word.to_owned())
 }
 
+#[cfg(test)]
 fn parse_tsv(raw: &str) -> Result<OcrResult> {
+    parse_tsv_mode(raw, true)
+}
+
+fn parse_tsv_mode(raw: &str, dialogue: bool) -> Result<OcrResult> {
+    let minimum_line_confidence = if dialogue { MIN_LINE_CONFIDENCE } else { -1.0 };
     let mut lines: Vec<OcrLine> = Vec::new();
     for row in raw.lines().skip(1) {
         let columns: Vec<_> = row.splitn(12, '\t').collect();
@@ -414,7 +538,7 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
             let dialogue_line = line.word_count >= 2 || text.ends_with(['.', '!', '?']);
             (dialogue_line
                 && text.chars().filter(|c| c.is_alphanumeric()).count() >= 2
-                && confidence >= MIN_LINE_CONFIDENCE)
+                && confidence >= minimum_line_confidence)
                 .then_some((
                     text,
                     line.confidence_total,
@@ -437,15 +561,21 @@ fn parse_tsv(raw: &str) -> Result<OcrResult> {
         .join(" ");
     let looks_like_dialogue =
         text.split_whitespace().count() >= 2 || text.ends_with(['.', '!', '?']);
-    if text.is_empty() || !looks_like_dialogue || confidence < MIN_RESULT_CONFIDENCE {
+    let minimum_result_confidence = if dialogue { MIN_RESULT_CONFIDENCE } else { 0.0 };
+    if text.is_empty() || !looks_like_dialogue || confidence < minimum_result_confidence {
         bail!("OCR result rejected (confidence {confidence:.1})");
     }
-    validate_dialogue(OcrResult {
+    let result = OcrResult {
         text,
         confidence,
         line_count,
         word_confidences,
-    })
+    };
+    if dialogue {
+        validate_dialogue(result)
+    } else {
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
@@ -643,6 +773,25 @@ mod tests {
         let text = recognize_window(&image).unwrap().text;
         assert!(text.contains("When you're having trouble in a trainer"), "{text}");
         assert!(text.contains("allowed to forfeit"), "{text}");
+    }
+
+    #[test]
+    fn recognizes_move_menu_columns_and_description() {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/move-menu.png");
+        let image = image::open(fixture).unwrap();
+        let text = recognize_window(&image).unwrap().text;
+        for expected in [
+            "Scratch",
+            "Growl",
+            "Ember",
+            "Smokescreen",
+            "Fire Fang",
+            "user releases",
+            "reduces the target",
+        ] {
+            assert!(text.contains(expected), "missing {expected}: {text}");
+        }
     }
 
 }

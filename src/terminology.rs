@@ -83,6 +83,9 @@ fn battle_move(name: &str) -> &str {
         "Sand Attack" => "泼沙",
         "Constrict" => "缠绕",
         "Scratch" => "抓",
+        "Growl" => "叫声",
+        "Smokescreen" => "烟幕",
+        "Fire Fang" => "火之牙",
         _ => name,
     }
 }

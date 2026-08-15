@@ -184,8 +184,31 @@ fn run() -> Result<()> {
                         ),
                     );
                     let event_start = change_started.unwrap_or_else(Instant::now);
-                    pending = Some((result, Instant::now() + COMMIT_DELAY, event_start));
-                    logger::write("candidate-pending", "waiting for unchanged text image");
+                    if should_commit_immediately(&result) {
+                        if dedup.is_new(&result.text) {
+                            let id = next_event_id;
+                            next_event_id += 1;
+                            translation_tx
+                                .send(TranslationJob {
+                                    id,
+                                    original: result.text,
+                                })
+                                .context("翻译线程已退出")?;
+                            latest_confirmed = Some(id);
+                            event_started.insert(id, event_start);
+                            logger::write(
+                                "confirmed-fast",
+                                &format!(
+                                    "id={id} since_change_ms={}",
+                                    event_start.elapsed().as_millis()
+                                ),
+                            );
+                            change_started = None;
+                        }
+                    } else {
+                        pending = Some((result, Instant::now() + COMMIT_DELAY, event_start));
+                        logger::write("candidate-pending", "waiting for unchanged text image");
+                    }
                 }
                 Err(error) => logger::write(
                     "ocr-rejected",
@@ -238,6 +261,19 @@ fn run() -> Result<()> {
             &mut event_started,
         );
     }
+}
+
+fn should_commit_immediately(result: &OcrResult) -> bool {
+    let text = result.text.as_str();
+    result.confidence >= 55.0
+        && (text.starts_with("Move menu:")
+            || text.ends_with(['.', '!', '?'])
+            || text.contains(" used ")
+            || text.contains(" fainted")
+            || text.contains(" Exp. Points")
+            || text.starts_with("Go! ")
+            || text.starts_with("You defeated ")
+            || text.starts_with("You got "))
 }
 
 fn wait_for_translation(
@@ -338,4 +374,27 @@ fn translation_worker(
         }
     });
     (job_tx, result_rx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_commit_immediately;
+    use crate::ocr::OcrResult;
+
+    fn result(text: &str, confidence: f32) -> OcrResult {
+        OcrResult {
+            text: text.into(),
+            confidence,
+            line_count: 1,
+            word_confidences: vec![confidence; text.split_whitespace().count()],
+        }
+    }
+
+    #[test]
+    fn immediately_commits_complete_battle_and_menu_text() {
+        assert!(should_commit_immediately(&result("Charmeleon used Ember!", 57.5)));
+        assert!(should_commit_immediately(&result("The opposing Spearow fainted!", 82.3)));
+        assert!(should_commit_immediately(&result("Move menu: Scratch", 60.0)));
+        assert!(!should_commit_immediately(&result("Would you like to", 80.0)));
+    }
 }

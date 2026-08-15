@@ -125,11 +125,15 @@ impl Translator {
 术语：Pokémon=宝可梦，Pecha Berry=桃桃果，Berries Pocket=树果口袋，\
 Potion=伤药，Medicine Pocket=药品口袋，Pokémon Center=宝可梦中心，\
 Poké Mart=友好商店，Charmander=小火龙，Pichu=皮丘，Pokédex=宝可梦图鉴，\
-Poké Ball=精灵球，Antidote=解毒药。\n{original}"
+Poké Ball=精灵球，Antidote=解毒药，Scratch=抓，Growl=叫声，Ember=火花，\
+Smokescreen=烟幕，Fire Fang=火之牙。\n{original}"
         );
         let translated = self.generate(&prompt)?;
         if translated.trim().is_empty() {
             bail!("本地翻译模型返回空文本");
+        }
+        if translated.contains("应为") || translated.contains("更正后") {
+            bail!("本地翻译模型返回了解释而不是译文");
         }
         Ok(translated.trim().to_owned())
     }
